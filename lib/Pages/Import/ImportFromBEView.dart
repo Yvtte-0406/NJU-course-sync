@@ -136,43 +136,50 @@ class ImportFromBEViewState extends State<ImportFromBEView> {
     );
   }
 
+  /// 只负责"跑 WebView 抓取 -> 拉取远程 extractJS -> 执行 -> JSON decode"，
+  /// 不做任何数据库写入，供导入流程和"检查更新"流程共用。
+  static Future<Map> fetchCourseTableMap(
+      WebViewController controller, Map config,
+      {String? rsp}) async {
+    String response = "";
+    if (rsp == null) {
+      await controller.runJavaScript(config['preExtractJS'] ?? '');
+      await Future.delayed(Duration(seconds: config['delayTime'] ?? 0));
+      Dio dio = Dio();
+
+      String url = '';
+      if (Platform.isIOS) {
+        url = config['extractJSfileiOS'] ?? "";
+      } else if (Platform.isAndroid) {
+        url = config['extractJSfileAndroid'] ?? "";
+      } else if (Platform.operatingSystem == 'ohos') {
+        url = config['extractJSfileOHOS'] ?? "";
+      }
+
+      Response serverRsp = await dio.get(url);
+      String js = serverRsp.data;
+      var result = await controller.runJavaScriptReturningResult(js);
+      response = result.toString();
+
+      if (response.startsWith('"') && response.endsWith('"')) {
+        response = response.substring(1, response.length - 1);
+      }
+    } else {
+      response = rsp;
+    }
+
+    response = Uri.decodeComponent(response.replaceAll('"', ''));
+    return json.decode(response);
+  }
+
   import(WebViewController controller, BuildContext context,
       {String? rsp}) async {
     try {
-      String response = "";
       CourseTableProvider courseTableProvider = CourseTableProvider();
       Toast.showToast(S.of(context).class_parse_toast_importing, context);
 
-      if (rsp == null) {
-        await controller.runJavaScript(widget.config['preExtractJS'] ?? '');
-        await Future.delayed(
-            Duration(seconds: widget.config['delayTime'] ?? 0));
-        Dio dio = Dio();
-
-        String url = '';
-        if (Platform.isIOS) {
-          url = widget.config['extractJSfileiOS'] ?? "";
-          ;
-        } else if (Platform.isAndroid) {
-          url = widget.config['extractJSfileAndroid'] ?? "";
-        } else if (Platform.operatingSystem == 'ohos') {
-          url = widget.config['extractJSfileOHOS'] ?? "";
-        }
-
-        Response serverRsp = await dio.get(url);
-        String js = serverRsp.data;
-        var result = await controller.runJavaScriptReturningResult(js);
-        response = result.toString();
-
-        if (response.startsWith('"') && response.endsWith('"')) {
-          response = response.substring(1, response.length - 1);
-        }
-      } else {
-        response = rsp;
-      }
-
-      response = Uri.decodeComponent(response.replaceAll('"', ''));
-      Map courseTableMap = json.decode(response);
+      Map courseTableMap =
+          await fetchCourseTableMap(controller, widget.config, rsp: rsp);
 
       CourseTable courseTable;
       if (widget.config['class_time_list'] == null &&
@@ -215,6 +222,17 @@ class ImportFromBEViewState extends State<ImportFromBEView> {
             CourseImportCodec.onlineCourseToDbMap(courseMap, tableId: index);
         Course course = Course.fromMap(dbMap);
         await courseProvider.insert(course);
+      }
+      // 记录这张表来自哪个学校配置、以及本次抓取的原始课程数据，
+      // 供后续"检查更新"功能做 diff 用。
+      final pinyin = widget.config['pinyin'];
+      if (pinyin != null) {
+        await courseTableProvider.updateCheckUpdateInfo(
+          index,
+          sourceSchoolPinyin: pinyin.toString(),
+          lastSnapshot: json.encode(coursesMap),
+          lastCheckedAt: DateTime.now().toIso8601String(),
+        );
       }
       UmengCommonSdk.onEvent(
           "class_import", {"type": "be", "action": "success"});
