@@ -1,11 +1,10 @@
 import 'dart:convert';
-import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import '../../Components/Toast.dart';
 import '../../Models/CourseModel.dart';
 import '../../Models/CourseTableModel.dart';
-import '../../Resources/Url.dart';
+import '../../Resources/NjuConfig.dart';
 import '../../Utils/CourseDiff.dart';
 import '../../Utils/CourseImportCodec.dart';
 import '../Import/ImportFromBEView.dart';
@@ -54,22 +53,8 @@ class _CheckUpdateViewState extends State<CheckUpdateView> {
       return;
     }
 
-    Map? config;
-    try {
-      Dio dio = Dio();
-      Response response = await dio.get(Url.UPDATE_ROOT + '/schoolList.json');
-      List list = response.data['data'];
-      for (final item in list) {
-        if (item['pinyin'] == pinyin) {
-          config = item;
-          break;
-        }
-      }
-    } catch (e) {
-      config = null;
-    }
-
-    if (config == null) {
+    final entry = NjuConfig.findByPinyin(pinyin);
+    if (entry == null) {
       setState(() {
         _stage = _Stage.unsupported;
         _message = '未能找到该课表对应的学校配置，无法检查更新。';
@@ -78,7 +63,7 @@ class _CheckUpdateViewState extends State<CheckUpdateView> {
     }
 
     setState(() {
-      _config = config;
+      _config = entry.toConfigMap();
       _stage = _Stage.webview;
     });
     _initWebView();

@@ -89,7 +89,7 @@ class AppThemes {
       ),
 
       // Card
-      cardTheme: CardTheme(
+      cardTheme: CardThemeData(
         elevation: 0,
         surfaceTintColor: Colors.transparent,
         color: scheme.surfaceContainerHighest,
@@ -97,7 +97,7 @@ class AppThemes {
       ),
 
       // Dialog
-      dialogTheme: DialogTheme(
+      dialogTheme: DialogThemeData(
         elevation: 0,
         surfaceTintColor: Colors.transparent,
         shape: shape,

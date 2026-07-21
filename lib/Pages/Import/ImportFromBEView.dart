@@ -30,6 +30,42 @@ class ImportFromBEView extends StatefulWidget {
   State<StatefulWidget> createState() {
     return ImportFromBEViewState();
   }
+
+  /// 只负责"跑 WebView 抓取 -> 拉取远程 extractJS -> 执行 -> JSON decode"，
+  /// 不做任何数据库写入，供导入流程和"检查更新"流程共用。
+  static Future<Map> fetchCourseTableMap(
+      WebViewController controller, Map config,
+      {String? rsp}) async {
+    String response = "";
+    if (rsp == null) {
+      await controller.runJavaScript(config['preExtractJS'] ?? '');
+      await Future.delayed(Duration(seconds: config['delayTime'] ?? 0));
+      Dio dio = Dio();
+
+      String url = '';
+      if (Platform.isIOS) {
+        url = config['extractJSfileiOS'] ?? "";
+      } else if (Platform.isAndroid) {
+        url = config['extractJSfileAndroid'] ?? "";
+      } else if (Platform.operatingSystem == 'ohos') {
+        url = config['extractJSfileOHOS'] ?? "";
+      }
+
+      Response serverRsp = await dio.get(url);
+      String js = serverRsp.data;
+      var result = await controller.runJavaScriptReturningResult(js);
+      response = result.toString();
+
+      if (response.startsWith('"') && response.endsWith('"')) {
+        response = response.substring(1, response.length - 1);
+      }
+    } else {
+      response = rsp;
+    }
+
+    response = Uri.decodeComponent(response.replaceAll('"', ''));
+    return json.decode(response);
+  }
 }
 
 class ImportFromBEViewState extends State<ImportFromBEView> {
@@ -136,50 +172,15 @@ class ImportFromBEViewState extends State<ImportFromBEView> {
     );
   }
 
-  /// 只负责"跑 WebView 抓取 -> 拉取远程 extractJS -> 执行 -> JSON decode"，
-  /// 不做任何数据库写入，供导入流程和"检查更新"流程共用。
-  static Future<Map> fetchCourseTableMap(
-      WebViewController controller, Map config,
-      {String? rsp}) async {
-    String response = "";
-    if (rsp == null) {
-      await controller.runJavaScript(config['preExtractJS'] ?? '');
-      await Future.delayed(Duration(seconds: config['delayTime'] ?? 0));
-      Dio dio = Dio();
-
-      String url = '';
-      if (Platform.isIOS) {
-        url = config['extractJSfileiOS'] ?? "";
-      } else if (Platform.isAndroid) {
-        url = config['extractJSfileAndroid'] ?? "";
-      } else if (Platform.operatingSystem == 'ohos') {
-        url = config['extractJSfileOHOS'] ?? "";
-      }
-
-      Response serverRsp = await dio.get(url);
-      String js = serverRsp.data;
-      var result = await controller.runJavaScriptReturningResult(js);
-      response = result.toString();
-
-      if (response.startsWith('"') && response.endsWith('"')) {
-        response = response.substring(1, response.length - 1);
-      }
-    } else {
-      response = rsp;
-    }
-
-    response = Uri.decodeComponent(response.replaceAll('"', ''));
-    return json.decode(response);
-  }
-
   import(WebViewController controller, BuildContext context,
       {String? rsp}) async {
     try {
       CourseTableProvider courseTableProvider = CourseTableProvider();
       Toast.showToast(S.of(context).class_parse_toast_importing, context);
 
-      Map courseTableMap =
-          await fetchCourseTableMap(controller, widget.config, rsp: rsp);
+      Map courseTableMap = await ImportFromBEView.fetchCourseTableMap(
+          controller, widget.config,
+          rsp: rsp);
 
       CourseTable courseTable;
       if (widget.config['class_time_list'] == null &&
