@@ -43,7 +43,6 @@ dependencies:
   archive: ^3.4.10
   html: ^0.15.0
   dio: ^5.9.0
-  encrypt: ^5.0.3
 
   # https://gitcode.com/openharmony-sig/flutter_plus_plugins/pull/52
   package_info_plus:

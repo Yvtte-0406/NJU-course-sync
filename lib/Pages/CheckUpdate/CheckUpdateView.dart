@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
@@ -31,6 +32,7 @@ class _CheckUpdateViewState extends State<CheckUpdateView> {
   String _message = '正在准备检查…';
   Map? _config;
   WebViewController? _webViewController;
+  Timer? _sessionTimeoutTimer;
 
   CourseDiffResult? _diff;
   List<Map<String, dynamic>>? _newCoursesMap;
@@ -40,6 +42,12 @@ class _CheckUpdateViewState extends State<CheckUpdateView> {
   void initState() {
     super.initState();
     _prepare();
+  }
+
+  @override
+  void dispose() {
+    _sessionTimeoutTimer?.cancel();
+    super.dispose();
   }
 
   Future<void> _prepare() async {
@@ -81,12 +89,41 @@ class _CheckUpdateViewState extends State<CheckUpdateView> {
                 url.startsWith(config['redirectUrl'])) {
               _webViewController!.loadRequest(Uri.parse(config['targetUrl']));
             } else if (url.startsWith(config['targetUrl'])) {
+              _sessionTimeoutTimer?.cancel();
               _fetchAndDiff();
+            } else if (url.contains('authserver.nju.edu.cn/authserver/login')) {
+              // 落回了登录页，说明之前保存的登录状态已经失效——"检查更新"
+              // 本身不做登录（那一整套自动填表/验证码兜底逻辑只在
+              // ImportView 里维护一份，这里不重复实现），直接提示用户
+              // 去导入页重新登录一次。
+              _sessionTimeoutTimer?.cancel();
+              if (!mounted) return;
+              setState(() {
+                _stage = _Stage.unsupported;
+                _message = '登录状态已失效，需要重新登录。请到"导入南大课表"页面用'
+                    '"新账号登录"重新登录一次，之后再回来检查更新。';
+              });
             }
+          },
+          onWebResourceError: (error) {
+            _sessionTimeoutTimer?.cancel();
+            if (!mounted) return;
+            setState(() {
+              _stage = _Stage.unsupported;
+              _message = '网络错误，请检查网络连接（如需要请先连接南京大学 VPN）。';
+            });
           },
         ),
       )
       ..loadRequest(Uri.parse(config['initialUrl']));
+
+    _sessionTimeoutTimer = Timer(const Duration(seconds: 20), () {
+      if (!mounted || _stage != _Stage.webview) return;
+      setState(() {
+        _stage = _Stage.unsupported;
+        _message = '检查超时，请稍后重试。';
+      });
+    });
   }
 
   Future<void> _fetchAndDiff() async {

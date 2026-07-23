@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:scoped_model/scoped_model.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import '../../Components/Toast.dart';
 import '../../Models/CourseModel.dart';
@@ -24,10 +25,11 @@ class ImportView extends StatefulWidget {
 }
 
 enum _Stage {
+  checkingPriorLogin,
+  quickImportChoice,
   loginForm,
   loggingIn,
   needManualLogin,
-  choosingProgram,
   fetching,
   error,
 }
@@ -38,7 +40,10 @@ class _ImportViewState extends State<ImportView> {
   final _courseTableProvider = CourseTableProvider();
   final _courseProvider = CourseProvider();
 
-  _Stage _stage = _Stage.loginForm;
+  _Stage _stage = _Stage.checkingPriorLogin;
+  // 重试时要回到的"起始页"：检测到之前登录过就是快捷导入选择页，
+  // 否则是普通登录表单。
+  _Stage _initialStage = _Stage.loginForm;
   String _statusText = '';
   String _errorText = '';
 
@@ -46,6 +51,46 @@ class _ImportViewState extends State<ImportView> {
   NjuEntryConfig? _activeConfig;
   bool _autofillAttempted = false;
   Timer? _loginTimeoutTimer;
+  // 快捷导入和普通登录共用同一套 _beginLogin/_onPageFinished 机制，
+  // 靠这个标记区分行为：快捷导入模式下落回登录页直接算失败，不会像
+  // 普通登录那样尝试自动填表/弹出真实页面手动兜底。
+  bool _quickImportMode = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _checkPriorLogin();
+  }
+
+  /// "登录成功过"跟"课表导入成功过"是两件独立的事——比如暑期没课，
+  /// 抓取那一步会失败、根本不会生成课表，但登录本身是成功的。所以这里
+  /// 单独存一个标记，只要曾经真正走到过"选本科/研究生"那一步（意味着
+  /// 登录本身通过了），就认为"之前登录过"，不依赖有没有课表。
+  static const _prefsHasLoggedInKey = 'nju_has_logged_in_before';
+
+  Future<void> _checkPriorLogin() async {
+    bool hasPrior = false;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      hasPrior = prefs.getBool(_prefsHasLoggedInKey) ?? false;
+    } catch (_) {
+      hasPrior = false;
+    }
+    if (!mounted) return;
+    setState(() {
+      _initialStage = hasPrior ? _Stage.quickImportChoice : _Stage.loginForm;
+      _stage = _initialStage;
+    });
+  }
+
+  Future<void> _markLoginSucceeded() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_prefsHasLoggedInKey, true);
+    } catch (_) {
+      // 存不上就算了，最多下次还是从登录表单开始，不影响这次的登录本身。
+    }
+  }
 
   @override
   void dispose() {
@@ -70,6 +115,7 @@ class _ImportViewState extends State<ImportView> {
       Toast.showToast('请输入账号和密码', context);
       return;
     }
+    _quickImportMode = false;
     setState(() {
       _stage = _Stage.loggingIn;
       _statusText = '正在登录...';
@@ -77,17 +123,24 @@ class _ImportViewState extends State<ImportView> {
     _beginLogin(NjuConfig.loginProbe);
   }
 
-  void _beginLogin(NjuEntryConfig config) {
+  /// 快捷导入和普通登录唯一的区别就是超时时长和"落回登录页算什么"——
+  /// 后者的判断在 [_onPageFinished] 里按 [_quickImportMode] 分支，
+  /// WebViewController 的创建、导航、超时计时器都是同一套，不重复实现。
+  void _beginLogin(NjuEntryConfig config, {int timeoutSeconds = 25}) {
     _activeConfig = config;
     _autofillAttempted = false;
     _loginTimeoutTimer?.cancel();
-    _loginTimeoutTimer = Timer(const Duration(seconds: 25), () {
-      if (mounted && (_stage == _Stage.loggingIn)) {
-        setState(() {
+    _loginTimeoutTimer = Timer(Duration(seconds: timeoutSeconds), () {
+      if (!mounted || _stage != _Stage.loggingIn) return;
+      setState(() {
+        if (_quickImportMode) {
+          _stage = _Stage.error;
+          _errorText = '快捷导入超时，无法确认登录状态是否有效，请改用"新账号登录"。';
+        } else {
           _stage = _Stage.needManualLogin;
           _statusText = '自动登录超时，请在下方手动完成登录';
-        });
-      }
+        }
+      });
     });
 
     if (_webViewController == null) {
@@ -117,23 +170,33 @@ class _ImportViewState extends State<ImportView> {
 
     if (url.startsWith(config.targetUrl)) {
       _loginTimeoutTimer?.cancel();
-      if (_stage == _Stage.choosingProgram || _stage == _Stage.fetching) {
-        // 已经在选择/抓取阶段，避免重复触发。
+      if (_stage == _Stage.fetching) {
+        // 已经在抓取阶段，避免重复触发。
         return;
       }
+      unawaited(_markLoginSucceeded());
+      await _fetchAndImport(config);
+      return;
+    }
+
+    final isLoginPage = url.contains('authserver.nju.edu.cn/authserver/login');
+    if (!isLoginPage) return;
+    if (_stage != _Stage.loggingIn && _stage != _Stage.needManualLogin) return;
+
+    if (_quickImportMode) {
+      // 快捷导入模式：落回登录页就是失败，不自动填表、不弹真实页面
+      // 手动兜底——这些都是"需要账号密码"的动作，快捷导入的前提就是
+      // 不需要用户再输一遍。
+      _loginTimeoutTimer?.cancel();
       setState(() {
-        _stage = _Stage.choosingProgram;
-        _statusText = '登录成功';
+        _stage = _Stage.error;
+        _errorText = '快捷导入失败：保存的登录状态已失效或不存在，请改用"新账号登录"重新登录一次。';
       });
       return;
     }
 
     // 还停在登录页：第一次尝试自动填表提交，之后如果又回到登录页，
     // 说明提交失败（账号密码错误，或者过了验证码兜底页又失败一次）。
-    final isLoginPage = url.contains('authserver.nju.edu.cn/authserver/login');
-    if (!isLoginPage) return;
-    if (_stage != _Stage.loggingIn && _stage != _Stage.needManualLogin) return;
-
     if (!_autofillAttempted) {
       _autofillAttempted = true;
       final status = await _attemptAutoFill();
@@ -295,6 +358,46 @@ class _ImportViewState extends State<ImportView> {
     }
   }
 
+  /// 调试用：把当前页面上"看起来像验证码/滑块组件"的那块 HTML 导出，
+  /// 显示在错误页里方便长按复制。不知道确切的容器选择器，所以尝试了
+  /// 几种常见命名，找不到就退而求其次导出整个可见弹窗/对话框区域。
+  Future<void> _dumpCaptchaHtml() async {
+    const js = '''
+      (function(){
+        var candidates = [
+          '#sliderDiv', '.sliderDiv', '[id*="slider" i]', '[class*="slider" i]',
+          '[id*="captcha" i]', '[class*="captcha" i]',
+          '[id*="puzzle" i]', '[class*="puzzle" i]'
+        ];
+        for (var i=0;i<candidates.length;i++){
+          var el = document.querySelector(candidates[i]);
+          if (el) {
+            var rect = el.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) {
+              // 往上找到看起来像"弹窗容器"的祖先，信息更完整。
+              var container = el.closest('.card, .modal, .dialog, [class*="card" i], [class*="modal" i], [class*="dialog" i]') || el;
+              return container.outerHTML.substring(0, 4000);
+            }
+          }
+        }
+        // 都没找到：退而求其次，导出所有可见的 canvas/dialog 元素的父级结构。
+        var canvas = document.querySelector('canvas');
+        if (canvas) {
+          var parent = canvas.closest('div');
+          for (var j=0;j<4 && parent && parent.parentElement; j++) parent = parent.parentElement;
+          return (parent || canvas).outerHTML.substring(0, 4000);
+        }
+        return document.body.outerHTML.substring(0, 4000);
+      })();
+    ''';
+    final dump = await _runJs(js);
+    if (!mounted) return;
+    setState(() {
+      _stage = _Stage.error;
+      _errorText = '验证组件结构（长按可复制发给开发者）：\n\n$dump';
+    });
+  }
+
   Future<String> _scrapeLoginError() async {
     const js = '''
       (function(){
@@ -325,19 +428,6 @@ class _ImportViewState extends State<ImportView> {
       return text;
     } catch (e) {
       return '';
-    }
-  }
-
-  void _choosePrograms(bool isGraduate) {
-    if (!isGraduate) {
-      // 探测阶段用的就是本科配置，已经在目标页上了，直接抓取。
-      _fetchAndImport(NjuConfig.undergraduate);
-    } else {
-      setState(() {
-        _stage = _Stage.loggingIn;
-        _statusText = '正在切换到研究生教务系统...';
-      });
-      _beginLogin(NjuConfig.graduate);
     }
   }
 
@@ -397,9 +487,12 @@ class _ImportViewState extends State<ImportView> {
     }
   }
 
-  void _retry() {
+  /// 统一的"重置状态回到某个起始页"，默认回到 [_initialStage]（快捷导入
+  /// 选择页或登录表单），也可以指定具体页面（比如"新账号登录"按钮要强制
+  /// 回登录表单，不是回快捷导入选择页）。
+  void _retry({_Stage? stage}) {
     setState(() {
-      _stage = _Stage.loginForm;
+      _stage = stage ?? _initialStage;
       _statusText = '';
       _errorText = '';
       _webViewController = null;
@@ -418,6 +511,10 @@ class _ImportViewState extends State<ImportView> {
 
   Widget _buildBody(BuildContext context) {
     switch (_stage) {
+      case _Stage.checkingPriorLogin:
+        return const Center(child: CircularProgressIndicator());
+      case _Stage.quickImportChoice:
+        return _buildQuickImportChoice(context);
       case _Stage.loginForm:
         return _buildLoginForm(context);
       case _Stage.loggingIn:
@@ -436,15 +533,69 @@ class _ImportViewState extends State<ImportView> {
         return Column(children: [
           Padding(
             padding: const EdgeInsets.all(12),
-            child: Text(_statusText, textAlign: TextAlign.center),
+            child: Column(children: [
+              Text(_statusText, textAlign: TextAlign.center),
+              const SizedBox(height: 8),
+              TextButton(
+                onPressed: _dumpCaptchaHtml,
+                child: const Text('（调试用）导出当前验证组件结构'),
+              ),
+            ]),
           ),
           Expanded(child: WebViewWidget(controller: _webViewController!)),
         ]);
-      case _Stage.choosingProgram:
-        return _buildProgramChoice(context);
       case _Stage.error:
         return _buildError(context);
     }
+  }
+
+  Widget _buildQuickImportChoice(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('检测到之前登录过南大账号', style: TextStyle(fontSize: 16)),
+            const SizedBox(height: 8),
+            const Text(
+              '"快捷导入"会尝试直接复用上次的登录状态，不需要重新输入账号密码；\n'
+              '如果登录状态已经失效，会提示失败原因，再用"新账号登录"重新登录即可。',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.grey),
+            ),
+            const SizedBox(height: 24),
+            ElevatedButton.icon(
+              onPressed: _tryQuickImport,
+              icon: const Icon(Icons.flash_on),
+              label: const Text('快捷导入'),
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: () {
+                _quickImportMode = false;
+                _retry(stage: _Stage.loginForm);
+              },
+              icon: const Icon(Icons.person_outline),
+              label: const Text('新账号登录'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 不填账号密码，直接拿之前登录时留下的 WebView 会话去访问登录地址——
+  /// 如果 Cookie 还有效，统一认证会跳过登录表单直接放行；如果已经失效，
+  /// 会被弹回登录页，[_onPageFinished] 在 [_quickImportMode] 下会明确
+  /// 报错，不自动退化成完整登录流程。跟普通登录共用同一套底层机制。
+  void _tryQuickImport() {
+    _quickImportMode = true;
+    setState(() {
+      _stage = _Stage.loggingIn;
+      _statusText = '正在尝试复用登录状态...';
+    });
+    _beginLogin(NjuConfig.loginProbe, timeoutSeconds: 15);
   }
 
   Widget _buildLoginForm(BuildContext context) {
@@ -469,27 +620,6 @@ class _ImportViewState extends State<ImportView> {
           ),
           const SizedBox(height: 24),
           ElevatedButton(onPressed: _submitLoginForm, child: const Text('登录')),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildProgramChoice(BuildContext context) {
-    return Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Text('登录成功，请选择身份', style: TextStyle(fontSize: 16)),
-          const SizedBox(height: 24),
-          ElevatedButton(
-            onPressed: () => _choosePrograms(false),
-            child: const Text('本科生'),
-          ),
-          const SizedBox(height: 12),
-          ElevatedButton(
-            onPressed: () => _choosePrograms(true),
-            child: const Text('研究生'),
-          ),
         ],
       ),
     );

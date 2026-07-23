@@ -31,7 +31,12 @@ class NjuEntryConfig {
         'redirectUrl': redirectUrl,
         'targetUrl': targetUrl,
         'preExtractJS': '',
-        'delayTime': 3,
+        // 教务系统那个页面是异步加载数据的现代前端应用，跳转到目标页
+        // 之后还需要一点时间才会把真实课表数据渲染出来。3 秒在"手动登录、
+        // 手动过验证码"耗时较长的情况下够用（页面在后台有充足时间加载），
+        // 但一旦登录变快（比如复用了已有会话，跳过了登录表单），这点缓冲
+        // 时间可能就不够了，调大一点留足余量。
+        'delayTime': 8,
         'extractJS': '',
         'extractJSfileAndroid': extractJSfileAndroid,
         'extractJSfileiOS': extractJSfileiOS,

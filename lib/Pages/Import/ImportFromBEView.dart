@@ -63,8 +63,45 @@ class ImportFromBEView extends StatefulWidget {
       response = rsp;
     }
 
+    final rawResponse = response;
     response = Uri.decodeComponent(response.replaceAll('"', ''));
-    return json.decode(response);
+    final decoded = json.decode(response);
+    if (decoded is! Map) {
+      final currentUrl = await controller.currentUrl();
+      // njubksjw2.js 内部大概率抛了异常（Android WebView 的已知坑：JS 抛错时
+      // runJavaScriptReturningResult 不会把异常带给 Dart，只会静默返回 "null"），
+      // 单独查一下页面上关键元素在不在，帮助判断脚本具体是在哪一步失败的。
+      String domDiagnostic = '（诊断脚本执行失败）';
+      try {
+        final diagJs = '''
+          (function(){
+            var nameEl = document.querySelector("#dqxnxqkclb");
+            var tableBody = document.querySelector("table tbody");
+            var anyTable = document.querySelector("table");
+            return JSON.stringify({
+              hasNameEl: !!nameEl,
+              nameElText: nameEl ? nameEl.textContent : null,
+              hasTableTbody: !!tableBody,
+              hasAnyTable: !!anyTable,
+              rowCount: tableBody ? tableBody.querySelectorAll("tr").length : 0,
+              bodyTextSnippet: document.body ? document.body.innerText.substring(0, 300) : null
+            });
+          })();
+        ''';
+        final diagResult = await controller.runJavaScriptReturningResult(diagJs);
+        domDiagnostic = diagResult.toString();
+      } catch (e) {
+        domDiagnostic = '诊断脚本本身出错：$e';
+      }
+      throw Exception(
+        '课表抓取脚本没有返回预期的数据（很可能是脚本内部报错，被 WebView 吞掉了）。\n\n'
+        '[调试] 抓取脚本执行时所在的网址：$currentUrl\n'
+        '[调试] 页面关键元素诊断：\n$domDiagnostic\n\n'
+        '[调试] 抓取脚本原始返回内容（JSON 解析前，前 1000 字）：\n'
+        '${rawResponse.substring(0, rawResponse.length > 1000 ? 1000 : rawResponse.length)}',
+      );
+    }
+    return decoded;
   }
 }
 
