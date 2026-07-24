@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:scoped_model/scoped_model.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
@@ -30,9 +32,18 @@ enum _Stage {
   loginForm,
   loggingIn,
   needManualLogin,
+  debugPreFetch,
   fetching,
   error,
 }
+
+// TODO(临时测试代码，成品发布前必须删除): 登录成功、抵达目标页之后，
+// 先把真实网页显示出来，让你手动切换学期（比如切到有课的下学期）再点
+// 按钮触发抓取，用来验证抓取/解析逻辑本身有没有问题，而不是自动直接抓
+// 当前学期（可能没课）。现阶段保留，用完之后把这个改回 false（或者
+// 直接删掉这段 + `_Stage.debugPreFetch` 相关代码 + `_buildBody` 里对应
+// 的 case 分支），恢复"登录成功自动抓取"的正式体验。
+const bool _kDebugManualSemesterPick = true; // TODO: 临时测试用，成品前删除
 
 class _ImportViewState extends State<ImportView> {
   final _usernameController = TextEditingController();
@@ -89,6 +100,29 @@ class _ImportViewState extends State<ImportView> {
       await prefs.setBool(_prefsHasLoggedInKey, true);
     } catch (_) {
       // 存不上就算了，最多下次还是从登录表单开始，不影响这次的登录本身。
+    }
+  }
+
+  /// 只在 Android 上、只问一次：小米/OPPO/vivo 等厂商定制系统喜欢清后台/
+  /// 清缓存，登录会话（WebView 里的 Cookie）存在系统层面，App 自己保护
+  /// 不了，只能申请忽略电池优化来降低被系统当成"后台可清理进程"的概率。
+  /// 这只是降低概率，不是保证；用户拒绝也不影响正常使用，所以失败/拒绝
+  /// 都直接吞掉，不打断导入成功的流程。
+  static const _prefsBatteryOptRequestedKey = 'nju_battery_opt_requested';
+
+  Future<void> _maybeRequestBatteryOptimizationExemption() async {
+    if (!Platform.isAndroid) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (prefs.getBool(_prefsBatteryOptRequestedKey) ?? false) return;
+      await prefs.setBool(_prefsBatteryOptRequestedKey, true);
+
+      final status = await Permission.ignoreBatteryOptimizations.status;
+      if (!status.isGranted) {
+        await Permission.ignoreBatteryOptimizations.request();
+      }
+    } catch (_) {
+      // 申请失败/被拒绝都无所谓，不影响导入本身。
     }
   }
 
@@ -170,11 +204,15 @@ class _ImportViewState extends State<ImportView> {
 
     if (url.startsWith(config.targetUrl)) {
       _loginTimeoutTimer?.cancel();
-      if (_stage == _Stage.fetching) {
-        // 已经在抓取阶段，避免重复触发。
+      if (_stage == _Stage.fetching || _stage == _Stage.debugPreFetch) {
+        // 已经在抓取/调试预览阶段，避免重复触发。
         return;
       }
       unawaited(_markLoginSucceeded());
+      if (_kDebugManualSemesterPick) {
+        setState(() => _stage = _Stage.debugPreFetch);
+        return;
+      }
       await _fetchAndImport(config);
       return;
     }
@@ -475,6 +513,8 @@ class _ImportViewState extends State<ImportView> {
         lastCheckedAt: DateTime.now().toIso8601String(),
       );
 
+      await _maybeRequestBatteryOptimizationExemption();
+
       if (!mounted) return;
       Toast.showToast('导入成功', context);
       Navigator.of(context).pop(true);
@@ -539,6 +579,26 @@ class _ImportViewState extends State<ImportView> {
               TextButton(
                 onPressed: _dumpCaptchaHtml,
                 child: const Text('（调试用）导出当前验证组件结构'),
+              ),
+            ]),
+          ),
+          Expanded(child: WebViewWidget(controller: _webViewController!)),
+        ]);
+      case _Stage.debugPreFetch: // TODO: 临时测试用，成品前删除（连同上面的 _kDebugManualSemesterPick）
+        return Column(children: [
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(children: [
+              const Text(
+                '（临时调试）登录成功，已到达课表页。\n'
+                '可以在下面手动切换学期（比如切到有课的下学期），\n'
+                '切好之后点按钮用当前页面内容抓取一次。',
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 8),
+              ElevatedButton(
+                onPressed: () => _fetchAndImport(_activeConfig!),
+                child: const Text('用当前页面内容抓取课表'),
               ),
             ]),
           ),

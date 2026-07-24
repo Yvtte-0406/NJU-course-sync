@@ -43,6 +43,9 @@ dependencies:
   archive: ^3.4.10
   html: ^0.15.0
   dio: ^5.9.0
+  # 只用在 Android，请求忽略电池优化，降低厂商定制系统清后台导致登录
+  # 会话丢失的概率；iOS/鸿蒙没有这个概念，调用处会用 Platform.isAndroid 判断跳过。
+  permission_handler: ^11.3.1
 
   # https://gitcode.com/openharmony-sig/flutter_plus_plugins/pull/52
   package_info_plus:
