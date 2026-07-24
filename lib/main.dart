@@ -77,10 +77,8 @@ class _MyAppState extends State<MyApp> {
               lightTheme = themeDataList[themeIndex];
               darkTheme = darkThemeDataList[themeIndex];
             } else {
-              lightTheme = getThemeData(customTheme, Brightness.light,
-                  useSeedScheme: model.material3ColorForLight);
-              darkTheme = getThemeData(customTheme, Brightness.dark,
-                  useSeedScheme: model.material3ColorForDark);
+              lightTheme = getThemeData(customTheme, Brightness.light);
+              darkTheme = getThemeData(customTheme, Brightness.dark);
             }
             return MaterialApp(
               debugShowCheckedModeBanner: false,

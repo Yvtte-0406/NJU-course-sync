@@ -46,6 +46,9 @@ dependencies:
   # 只用在 Android，请求忽略电池优化，降低厂商定制系统清后台导致登录
   # 会话丢失的概率；iOS/鸿蒙没有这个概念，调用处会用 Platform.isAndroid 判断跳过。
   permission_handler: ^11.3.1
+  # 课程自定义配色用的取色器（HSV 色轮 + 预设色块）。纯 Dart 实现，不含
+  # 任何平台原生代码/platform channel，鸿蒙 OHOS 构建不需要额外适配。
+  flutter_colorpicker: ^1.1.0
 
   # https://gitcode.com/openharmony-sig/flutter_plus_plugins/pull/52
   package_info_plus:
