@@ -99,6 +99,11 @@ flutter:
   uses-material-design: true
   assets:
     - res/icon.png
+    # 南大统一身份认证的自动登录脚本（原 Chrome 扩展 content script），
+    # 由 NjuAutoLoginScript 读出来注入登录页的 WebView。
+    - assets/scripts/auto_auth_login.js
+    # 脚本过滑块验证时回放的真人拖动轨迹。
+    - assets/recordings/3.json
 
 flutter_intl:
   enabled: true
