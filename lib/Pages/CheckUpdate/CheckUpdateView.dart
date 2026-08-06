@@ -36,8 +36,6 @@ class _CheckUpdateViewState extends State<CheckUpdateView> {
   Timer? _sessionTimeoutTimer;
 
   CourseDiffResult? _diff;
-  List<Map<String, dynamic>>? _newCoursesMap;
-  List<Course>? _oldCourses;
 
   @override
   void initState() {
@@ -165,8 +163,6 @@ class _CheckUpdateViewState extends State<CheckUpdateView> {
 
       setState(() {
         _diff = diff;
-        _newCoursesMap = newCoursesMap;
-        _oldCourses = oldCourses;
         _stage = _Stage.reviewing;
       });
     } catch (e) {
