@@ -27,7 +27,7 @@ class WeekTitle extends StatelessWidget {
     if (_isWhiteMode == null) {
       return null;
     } else {
-      return _isWhiteMode! ? Colors.white : Colors.black;
+      return _isWhiteMode ? Colors.white : Colors.black;
     }
   }
 
