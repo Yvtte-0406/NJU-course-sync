@@ -22,9 +22,9 @@ class ThemeChanger extends StatelessWidget {
     final model = MainStateModel.of(context);
     final selectedIndex = model.themeIndex ?? 0;
     final customIndex = themeDataList.length;
-    final customHex = (model.themeCustomColor as String?)?.isNotEmpty == true
-        ? model.themeCustomColor as String
-        : defaultCustomAccentColor;
+    final existingCustomHex = model.themeCustomColor as String?;
+    final hasCustomColor = existingCustomHex != null && existingCustomHex.isNotEmpty;
+    final customHex = hasCustomColor ? existingCustomHex : defaultCustomAccentColor;
 
     return Padding(
       padding: const EdgeInsets.only(top: 4, bottom: 4),
@@ -65,7 +65,14 @@ class ThemeChanger extends StatelessWidget {
                   onTap: () {
                     UmengCommonSdk.onEvent(
                         "theme_change", {"type": "custom_select"});
-                    MainStateModel.of(context).changeTheme(customIndex);
+                    // 只有已经真正设置过自定义色，点这个圆点才切到"自定义"
+                    // 这个主题槽位；还没设置过的话，只做预览联动（把色轮
+                    // 滚到默认色），不能把 themeIndex 切到一个还没有对应
+                    // 颜色数据的槽位——否则 main.dart 里按下标取
+                    // themeDataList[themeIndex] 会越界崩溃。
+                    if (hasCustomColor) {
+                      MainStateModel.of(context).changeTheme(customIndex);
+                    }
                     onColorPreview?.call(customHex);
                   },
                 ),
