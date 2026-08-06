@@ -27,12 +27,11 @@ void main() async {
   UmengCommonSdk.setPageCollectionModeAuto();
   // UmengCommonSdk.onEvent("privacy_accept", {"result":"accept"});
 
-  /// 原生安卓上去除状态栏遮罩
+  /// 原生安卓上开启沉浸式（状态栏/导航栏透明、内容可以画到底部安全区）。
+  /// 具体图标该用浅色还是深色，交给下面 MyApp 的 builder 里
+  /// AnnotatedRegion 按当前主题动态决定——这里只负责开启这个模式本身。
   /// https://blog.csdn.net/q515656712/article/details/139235710
   if (Platform.isAndroid) {
-    SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
-        systemNavigationBarColor: Colors.transparent,
-        statusBarColor: Colors.transparent));
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
   }
 
@@ -105,11 +104,28 @@ class _MyAppState extends State<MyApp> {
                 // 获取当前系统的配置（包含屏幕尺寸、亮度、系统设置的字重等）
                 final mediaQueryData = MediaQuery.of(context);
 
+                // 状态栏/导航栏图标该用浅色还是深色，跟着当前实际生效的
+                // 主题亮度走（不是系统亮度，是 Theme.of(context).brightness——
+                // 这个已经综合考虑了 themeMode 和用户选的浅色/深色）。用
+                // AnnotatedRegion 声明式设置，主题一变这里就会自动跟着
+                // 重新生效，不用像原来那样只在 main() 里设一次就不再更新。
+                final isDark = Theme.of(context).brightness == Brightness.dark;
+                final overlayStyle =
+                    (isDark ? SystemUiOverlayStyle.light : SystemUiOverlayStyle.dark)
+                        .copyWith(
+                  statusBarColor: Colors.transparent,
+                  systemNavigationBarColor: Colors.transparent,
+                  systemNavigationBarDividerColor: Colors.transparent,
+                );
+
                 // 强行覆盖 boldText 为 false
                 // 这样无论系统怎么发"变粗"的指令，Flutter 都会无视
-                return MediaQuery(
-                  data: mediaQueryData.copyWith(boldText: false),
-                  child: child!,
+                return AnnotatedRegion<SystemUiOverlayStyle>(
+                  value: overlayStyle,
+                  child: MediaQuery(
+                    data: mediaQueryData.copyWith(boldText: false),
+                    child: child!,
+                  ),
                 );
               },
             );
