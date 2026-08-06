@@ -8,9 +8,10 @@ import '../../Models/CourseTableModel.dart';
 import '../../Resources/NjuConfig.dart';
 import '../../Utils/CourseDiff.dart';
 import '../../Utils/CourseImportCodec.dart';
-import '../Import/ImportFromBEView.dart';
+import '../../Utils/NjuEhallJsonImporter.dart';
 
-/// "检查更新"页面：复用 [ImportFromBEView] 里同一套 WebView 抓取逻辑，
+/// "检查更新"页面：复用已登录 WebView，通过 [NjuEhallJsonImporter] 读取
+/// eHall JSON，
 /// 但只解析、不直接写库——抓到新数据后先和当前数据库里的课程做 diff，
 /// 展示变更预览，由用户确认后再落库。
 class CheckUpdateView extends StatefulWidget {
@@ -129,8 +130,10 @@ class _CheckUpdateViewState extends State<CheckUpdateView> {
   Future<void> _fetchAndDiff() async {
     try {
       Toast.showToast('正在抓取最新课表…', context);
-      final courseTableMap = await ImportFromBEView.fetchCourseTableMap(
-          _webViewController!, _config!);
+      final courseTableMap = await NjuEhallJsonImporter.fetchCourseTableMap(
+        _webViewController!,
+        pinyin: _config!['pinyin'].toString(),
+      );
 
       Iterable courses;
       final rawCourses = courseTableMap['courses'];
