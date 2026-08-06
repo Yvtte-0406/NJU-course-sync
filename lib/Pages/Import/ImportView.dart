@@ -11,14 +11,26 @@ import '../../Models/CourseModel.dart';
 import '../../Models/CourseTableModel.dart';
 import '../../Resources/NjuConfig.dart';
 import '../../Utils/CourseImportCodec.dart';
+import '../../Utils/NjuAutoLoginScript.dart';
+import '../../Utils/NjuCredentialStore.dart';
+import '../../Utils/NjuEhallJsonImporter.dart';
 import '../../Utils/States/MainState.dart';
-import 'ImportFromBEView.dart';
 
 /// 南大专属导入/登录流程。
 ///
-/// 三段式：原生登录表单 -> 后台 WebView 自动登录（探测到验证码就把
-/// 真实网页显示出来兜底）-> 本科/研究生选择 -> 复用
-/// [ImportFromBEView.fetchCourseTableMap] 抓取课表并写库。
+/// 只有一条登录链路：拿到账号密码 -> 后台 WebView 里跑自动登录脚本
+/// （填表 + 过滑块拼图，遇到图形验证码就把真实网页显示出来兜底）->
+/// 复用 [NjuEhallJsonImporter] 从已认证的 WebView 读取 eHall JSON，
+/// 写入现有课程表模型。
+///
+/// 账号密码从哪来分两种：第一次用要用户手输（[_Stage.loginForm]），
+/// 之后存在 [NjuCredentialStore] 里，"自动更新"直接拿它重跑同一条链路
+/// （[_Stage.autoUpdateChoice]）。
+///
+/// 早期版本还有一条"快捷导入"：不输账密，直接拿 WebView 里残留的
+/// Cookie 去访问目标页。实测会话保不住（系统清后台、Cookie 过期都会让
+/// 它失效），失败率高到没有使用价值，已经删掉——现在"之前登录过"省掉的
+/// 只是重新输账号密码，登录该走的流程一步都不少。
 class ImportView extends StatefulWidget {
   const ImportView({Key? key}) : super(key: key);
 
@@ -28,7 +40,7 @@ class ImportView extends StatefulWidget {
 
 enum _Stage {
   checkingPriorLogin,
-  quickImportChoice,
+  autoUpdateChoice,
   loginForm,
   loggingIn,
   needManualLogin,
@@ -52,8 +64,8 @@ class _ImportViewState extends State<ImportView> {
   final _courseProvider = CourseProvider();
 
   _Stage _stage = _Stage.checkingPriorLogin;
-  // 重试时要回到的"起始页"：检测到之前登录过就是快捷导入选择页，
-  // 否则是普通登录表单。
+  // 重试时要回到的"起始页"：之前登录过、账号密码也还在，就是自动更新
+  // 选择页，否则是登录表单。
   _Stage _initialStage = _Stage.loginForm;
   String _statusText = '';
   String _errorText = '';
@@ -62,24 +74,24 @@ class _ImportViewState extends State<ImportView> {
   NjuEntryConfig? _activeConfig;
   bool _autofillAttempted = false;
   Timer? _loginTimeoutTimer;
-  // 快捷导入和普通登录共用同一套 _beginLogin/_onPageFinished 机制，
-  // 靠这个标记区分行为：快捷导入模式下落回登录页直接算失败，不会像
-  // 普通登录那样尝试自动填表/弹出真实页面手动兜底。
-  bool _quickImportMode = false;
 
   @override
   void initState() {
     super.initState();
-    _checkPriorLogin();
+    _bootstrap();
   }
 
   /// "登录成功过"跟"课表导入成功过"是两件独立的事——比如暑期没课，
   /// 抓取那一步会失败、根本不会生成课表，但登录本身是成功的。所以这里
-  /// 单独存一个标记，只要曾经真正走到过"选本科/研究生"那一步（意味着
-  /// 登录本身通过了），就认为"之前登录过"，不依赖有没有课表。
+  /// 单独存一个标记，只要登录本身通过了就记上，不依赖有没有课表。
   static const _prefsHasLoggedInKey = 'nju_has_logged_in_before';
 
-  Future<void> _checkPriorLogin() async {
+  /// 决定进来先看到哪一页，顺便把记住的账号密码填进输入框。
+  ///
+  /// 两件事必须一起做：自动更新就是拿存下来的账号密码重跑一遍登录，
+  /// 所以"之前登录过"这个标记单独成立没用——用户手动清过密码的话，
+  /// 自动更新点了也没账号可用，那就跟没登录过一样直接进登录表单。
+  Future<void> _bootstrap() async {
     bool hasPrior = false;
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -87,9 +99,20 @@ class _ImportViewState extends State<ImportView> {
     } catch (_) {
       hasPrior = false;
     }
+    var username = '';
+    var password = '';
+    try {
+      (username, password) = await NjuCredentialStore.read();
+    } catch (_) {
+      // 读不到就当没存过，退回登录表单让用户手输。
+    }
     if (!mounted) return;
     setState(() {
-      _initialStage = hasPrior ? _Stage.quickImportChoice : _Stage.loginForm;
+      _usernameController.text = username;
+      _passwordController.text = password;
+      _initialStage = hasPrior && username.isNotEmpty && password.isNotEmpty
+          ? _Stage.autoUpdateChoice
+          : _Stage.loginForm;
       _stage = _initialStage;
     });
   }
@@ -134,14 +157,6 @@ class _ImportViewState extends State<ImportView> {
     super.dispose();
   }
 
-  String _jsStringEscape(String s) {
-    return s
-        .replaceAll('\\', '\\\\')
-        .replaceAll('"', '\\"')
-        .replaceAll('\n', '\\n')
-        .replaceAll('\r', '');
-  }
-
   void _submitLoginForm() {
     final username = _usernameController.text.trim();
     final password = _passwordController.text;
@@ -149,7 +164,6 @@ class _ImportViewState extends State<ImportView> {
       Toast.showToast('请输入账号和密码', context);
       return;
     }
-    _quickImportMode = false;
     setState(() {
       _stage = _Stage.loggingIn;
       _statusText = '正在登录...';
@@ -157,30 +171,29 @@ class _ImportViewState extends State<ImportView> {
     _beginLogin(NjuConfig.loginProbe);
   }
 
-  /// 快捷导入和普通登录唯一的区别就是超时时长和"落回登录页算什么"——
-  /// 后者的判断在 [_onPageFinished] 里按 [_quickImportMode] 分支，
-  /// WebViewController 的创建、导航、超时计时器都是同一套，不重复实现。
+  /// 打开后台 WebView 加载登录页，等 [_onPageFinished] 接手注入自动登录
+  /// 脚本。自动更新和手输账密走的是同一个方法——两者的区别只在账号密码
+  /// 从哪来（存的 / 刚输的），登录本身没有任何差别。
   void _beginLogin(NjuEntryConfig config, {int timeoutSeconds = 25}) {
     _activeConfig = config;
     _autofillAttempted = false;
     _loginTimeoutTimer?.cancel();
     _loginTimeoutTimer = Timer(Duration(seconds: timeoutSeconds), () {
       if (!mounted || _stage != _Stage.loggingIn) return;
-      setState(() {
-        if (_quickImportMode) {
-          _stage = _Stage.error;
-          _errorText = '快捷导入超时，无法确认登录状态是否有效，请改用"新账号登录"。';
-        } else {
-          _stage = _Stage.needManualLogin;
-          _statusText = '自动登录超时，请在下方手动完成登录';
-        }
-      });
+      // 走 _fallBackToManualLogin 而不是直接改 stage：超时的时候自动登录
+      // 脚本多半还在跑，必须先把它停掉再把表单交给用户。
+      _fallBackToManualLogin('自动登录超时，请在下方手动完成登录');
     });
 
+    final url = Uri.parse(config.initialUrl);
     if (_webViewController == null) {
       _webViewController = WebViewController()
         ..setJavaScriptMode(JavaScriptMode.unrestricted)
         ..setBackgroundColor(const Color(0x00000000))
+        ..addJavaScriptChannel(
+          NjuAutoLoginScript.channelName,
+          onMessageReceived: _onAutoLoginMessage,
+        )
         ..setNavigationDelegate(NavigationDelegate(
           onPageFinished: _onPageFinished,
           onWebResourceError: (error) {
@@ -192,9 +205,9 @@ class _ImportViewState extends State<ImportView> {
             });
           },
         ))
-        ..loadRequest(Uri.parse(config.initialUrl));
+        ..loadRequest(url);
     } else {
-      _webViewController!.loadRequest(Uri.parse(config.initialUrl));
+      _webViewController!.loadRequest(url);
     }
   }
 
@@ -209,6 +222,13 @@ class _ImportViewState extends State<ImportView> {
         return;
       }
       unawaited(_markLoginSucceeded());
+      // 登录真的成功了，把这次用的账号密码记住：下次进来就能直接
+      // "自动更新"，不用再输一遍。自动更新路径下存的就是同一份，
+      // 重存一次没有副作用。
+      unawaited(NjuCredentialStore.save(
+        _usernameController.text.trim(),
+        _passwordController.text,
+      ));
       if (_kDebugManualSemesterPick) {
         setState(() => _stage = _Stage.debugPreFetch);
         return;
@@ -221,32 +241,14 @@ class _ImportViewState extends State<ImportView> {
     if (!isLoginPage) return;
     if (_stage != _Stage.loggingIn && _stage != _Stage.needManualLogin) return;
 
-    if (_quickImportMode) {
-      // 快捷导入模式：落回登录页就是失败，不自动填表、不弹真实页面
-      // 手动兜底——这些都是"需要账号密码"的动作，快捷导入的前提就是
-      // 不需要用户再输一遍。
-      _loginTimeoutTimer?.cancel();
-      setState(() {
-        _stage = _Stage.error;
-        _errorText = '快捷导入失败：保存的登录状态已失效或不存在，请改用"新账号登录"重新登录一次。';
-      });
-      return;
-    }
-
-    // 还停在登录页：第一次尝试自动填表提交，之后如果又回到登录页，
+    // 还停在登录页：第一次注入自动登录脚本，之后如果又回到登录页，
     // 说明提交失败（账号密码错误，或者过了验证码兜底页又失败一次）。
     if (!_autofillAttempted) {
       _autofillAttempted = true;
-      final status = await _attemptAutoFill();
-      if (!mounted) return;
-      if (status != 'submitted') {
-        _loginTimeoutTimer?.cancel();
-        setState(() {
-          _stage = _Stage.needManualLogin;
-          _statusText = '需要验证码或无法自动识别登录框，请在下方手动完成登录';
-        });
-      }
-      // 状态是 submitted 的话，什么都不做，等下一次 onPageFinished。
+      await _startAutoLoginScript();
+      // 脚本是异步跑的（填表、过滑块、提交都要时间），结果通过
+      // JavaScriptChannel 回到 [_onAutoLoginMessage]，成功则由下一次
+      // onPageFinished 命中 targetUrl 接手，这里不再等它的返回值。
       return;
     }
 
@@ -279,121 +281,86 @@ class _ImportViewState extends State<ImportView> {
     return status;
   }
 
-  /// 模拟真实打字：逐字符 dispatch keydown/keypress/input/keyup，而不是
-  /// 一次性设置整段 value——南大登录页的密码框会实时按键计算加密/加盐后
-  /// 的值写进另一个隐藏字段，只补发一个 input 事件触发不了这个逻辑。
-  static String _simulateTypingJs(String targetVar, String text) {
-    final escaped = text;
-    return '''
-      (function(){
-        var s = "$escaped";
-        for (var k = 0; k < s.length; k++) {
-          var ch = s[k];
-          $targetVar.value = s.substring(0, k+1);
-          var opts = {bubbles: true, key: ch, char: ch, charCode: ch.charCodeAt(0), keyCode: ch.charCodeAt(0), which: ch.charCodeAt(0)};
-          $targetVar.dispatchEvent(new KeyboardEvent('keydown', opts));
-          $targetVar.dispatchEvent(new KeyboardEvent('keypress', opts));
-          $targetVar.dispatchEvent(new Event('input', {bubbles:true}));
-          $targetVar.dispatchEvent(new KeyboardEvent('keyup', opts));
-        }
-      })();
-    ''';
-  }
-
-  /// 第一阶段：只填用户名，然后触发失焦（南大页面用户名框绑了
-  /// onfocusout="checkUserCaptcha()"，会按需显示验证码框，可能是异步的，
-  /// 所以填完之后不立刻判断，交给 Dart 侧等一下再查）。
-  Future<String> _fillUsernameAndBlur() async {
-    final username = _jsStringEscape(_usernameController.text.trim());
-    final js = '''
-      (function(){
-        try {
-          var pwd = document.querySelector('input[type="password"]');
-          if(!pwd) return 'no_password_field';
-          var form = pwd.form || pwd.closest('form');
-          if(!form) return 'no_password_field';
-          var user = form.querySelector('input[type="text"], input[type="tel"], input:not([type]):not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="password"])');
-          if(!user) return 'no_username_field';
-          window.__njuUser = user;
-          window.__njuPwd = pwd;
-          window.__njuForm = form;
-          user.focus();
-          user.value = "$username";
-          user.dispatchEvent(new Event('input', {bubbles:true}));
-          user.dispatchEvent(new Event('change', {bubbles:true}));
-          user.dispatchEvent(new Event('blur', {bubbles:true}));
-          user.dispatchEvent(new Event('focusout', {bubbles:true}));
-          return 'filled';
-        } catch(e) {
-          return 'js_error';
-        }
-      })();
-    ''';
-    return _runJs(js);
-  }
-
-  /// 第二阶段：查一下验证码框有没有被 checkUserCaptcha() 显示出来；
-  /// 没有的话再逐字符"打"密码并提交。
-  Future<String> _checkCaptchaAndFillPassword() async {
-    final password = _jsStringEscape(_passwordController.text);
-    final typingJs = _simulateTypingJs('window.__njuPwd', password);
-    final js = '''
-      (function(){
-        try {
-          var pwd = window.__njuPwd;
-          var form = window.__njuForm;
-          if (!pwd || !form) return 'no_password_field';
-
-          // 除了账号/密码之外，表单里只要还有其他可见的、需要填的输入框
-          // （图片验证码、动态码，或任何我们没预料到的字段），一律交给
-          // 用户在真实网页里手动完成，不冒险瞎填。
-          var allInputs = form.querySelectorAll('input');
-          for (var i=0;i<allInputs.length;i++){
-            var el = allInputs[i];
-            if (el === window.__njuUser || el === pwd) continue;
-            var t = (el.type||'text').toLowerCase();
-            if (t === 'hidden' || t === 'submit' || t === 'button' || t === 'checkbox' || t === 'radio') continue;
-            var r = el.getBoundingClientRect();
-            if (r.width > 0 && r.height > 0) return 'captcha_required';
-          }
-
-          pwd.removeAttribute('readonly');
-          pwd.focus();
-          $typingJs
-          pwd.dispatchEvent(new Event('change', {bubbles:true}));
-          pwd.dispatchEvent(new Event('blur', {bubbles:true}));
-          pwd.dispatchEvent(new Event('focusout', {bubbles:true}));
-
-          // 注意：form.submit() 会跳过页面自己绑定的 submit 事件监听器
-          // （这很可能是密码加密/加盐逻辑真正执行的地方），必须找到真实
-          // 可点击的登录控件去点它，不能退回到 form.submit()。南大页面
-          // 验证码刷新用的是 <a onclick=...>，登录按钮大概率也不是标准
-          // <button>，所以选择器要放宽。
-          var submitEl = form.querySelector(
-            'button[type="submit"], input[type="submit"], button, ' +
-            '[class*="submit" i], [class*="login-btn" i], [class*="btn-login" i], ' +
-            '.ge-btn a, .ge-btn [onclick], .ge-btn button, [onclick*="login" i], [onclick*="submit" i]'
-          );
-          if (!submitEl) return 'no_submit_button';
-          submitEl.click();
-          return 'submitted';
-        } catch(e) {
-          return 'js_error';
-        }
-      })();
-    ''';
-    return _runJs(js);
-  }
-
-  Future<String> _attemptAutoFill() async {
+  /// 把 `assets/scripts/auto_auth_login.js` 注入登录页跑起来。填表、按需
+  /// 刷新验证码、过滑块、提交、判断结果全在那个脚本里，这边只负责启动它
+  /// 和接收它回传的消息（[_onAutoLoginMessage]）。
+  Future<void> _startAutoLoginScript() async {
     try {
-      final fillStatus = await _fillUsernameAndBlur();
-      if (fillStatus != 'filled') return fillStatus;
-      await Future.delayed(const Duration(milliseconds: 900));
-      return await _checkCaptchaAndFillPassword();
+      await NjuAutoLoginScript.inject(
+        _webViewController!,
+        username: _usernameController.text.trim(),
+        password: _passwordController.text,
+      );
     } catch (e) {
-      return 'js_error';
+      _fallBackToManualLogin('自动登录脚本启动失败（$e），请在下方手动完成登录');
     }
+  }
+
+  /// 自动登录脚本通过 JavaScriptChannel 回传的消息。
+  void _onAutoLoginMessage(JavaScriptMessage message) {
+    if (!mounted) return;
+    final event = NjuAutoLoginScript.decode(message.message);
+    switch (event.type) {
+      case 'log':
+        debugPrint('[NjuAutoLogin][${event.level}] ${event.message}');
+        return;
+      case 'solveCaptcha':
+        // 图形验证码识别在扩展里是丢给 background 跑 ONNX 模型的，App 里
+        // 没有推理运行时，识别不了。halt 掉脚本（不然它会一直刷验证码跟
+        // 用户抢输入框），把真实页面交还给用户手动填。
+        _fallBackToManualLogin('出现了图形验证码，请在下方手动完成登录');
+        return;
+      case 'loginComplete':
+        if (event.success) {
+          // 成功不在这里收口：还要等 WebView 真的跳到目标页，
+          // 由 [_onPageFinished] 命中 targetUrl 之后接手抓取。
+          return;
+        }
+        _handleAutoLoginFailure(event.message);
+        return;
+    }
+  }
+
+  /// 脚本抛上来的失败原因分两类：账号密码错这种再试也没用，直接报错；
+  /// 滑块/表单没搞定这种是「机器没过、人能过」，退回手动登录。
+  void _handleAutoLoginFailure(String reason) {
+    if (_stage != _Stage.loggingIn) return;
+    if (reason.contains('NJU_INVALID_CREDENTIALS')) {
+      _loginTimeoutTimer?.cancel();
+      unawaited(NjuAutoLoginScript.halt(_webViewController!));
+      setState(() {
+        _stage = _Stage.error;
+        _errorText = '账号或密码错误，请检查后重试';
+      });
+      return;
+    }
+    if (reason.contains('NJU_SLIDER_FAILED_TWICE')) {
+      _fallBackToManualLogin('滑块验证连续失败，请在下方手动完成登录');
+      return;
+    }
+    if (reason.contains('NJU_SLIDER_NO_POINTER_SUPPORT')) {
+      // 触摸和鼠标两种合成事件页面都没接住——多半是滑块组件换了实现
+      // （比如改用 Pointer Events）。这种是代码要跟着改的，不是用户能
+      // 解决的，日志里留一句好定位。
+      debugPrint('[NjuAutoLogin] 滑块对合成的 touch/mouse 事件都无反应');
+      _fallBackToManualLogin('无法自动完成滑块验证，请在下方手动滑动');
+      return;
+    }
+    _fallBackToManualLogin(
+        reason.isEmpty ? '自动登录失败，请在下方手动完成登录' : '自动登录失败：$reason\n请在下方手动完成登录');
+  }
+
+  /// 把页面交还给用户手动登录。必须先 halt 脚本：它还在跑的话会继续改
+  /// 输入框、刷验证码、点登录按钮，跟用户抢同一个表单。
+  void _fallBackToManualLogin(String statusText) {
+    if (_stage != _Stage.loggingIn) return;
+    _loginTimeoutTimer?.cancel();
+    final controller = _webViewController;
+    if (controller != null) unawaited(NjuAutoLoginScript.halt(controller));
+    setState(() {
+      _stage = _Stage.needManualLogin;
+      _statusText = statusText;
+    });
   }
 
   /// 调试用：把当前页面上"看起来像验证码/滑块组件"的那块 HTML 导出，
@@ -477,47 +444,11 @@ class _ImportViewState extends State<ImportView> {
     });
 
     try {
-      final courseTableMap = await ImportFromBEView.fetchCourseTableMap(
-          _webViewController!, config.toConfigMap());
-
-      Iterable courses;
-      final rawCourses = courseTableMap['courses'];
-      if (rawCourses.runtimeType != String) {
-        courses = rawCourses;
-      } else if (json.decode(rawCourses).runtimeType != String) {
-        courses = json.decode(rawCourses);
-      } else {
-        courses = json.decode(json.decode(rawCourses));
-      }
-      final coursesMap = List<Map<String, dynamic>>.from(courses);
-
-      final courseTable = await _courseTableProvider
-          .insert(CourseTable(courseTableMap['name']));
-      final tableId = courseTable.id!;
-
-      if (mounted) {
-        await ScopedModel.of<MainStateModel>(context).changeclassTable(tableId);
-      }
-
-      for (final courseMap in coursesMap) {
-        final dbMap =
-            CourseImportCodec.onlineCourseToDbMap(courseMap, tableId: tableId);
-        final course = Course.fromMap(dbMap);
-        await _courseProvider.insert(course);
-      }
-
-      await _courseTableProvider.updateCheckUpdateInfo(
-        tableId,
-        sourceSchoolPinyin: config.pinyin,
-        lastSnapshot: json.encode(coursesMap),
-        lastCheckedAt: DateTime.now().toIso8601String(),
+      final courseTableMap = await NjuEhallJsonImporter.fetchCourseTableMap(
+        _webViewController!,
+        pinyin: config.pinyin,
       );
-
-      await _maybeRequestBatteryOptimizationExemption();
-
-      if (!mounted) return;
-      Toast.showToast('导入成功', context);
-      Navigator.of(context).pop(true);
+      await _saveCourseTableMap(config, courseTableMap);
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -527,9 +458,52 @@ class _ImportViewState extends State<ImportView> {
     }
   }
 
-  /// 统一的"重置状态回到某个起始页"，默认回到 [_initialStage]（快捷导入
+  /// 把抓到的课表数据落库。
+  Future<void> _saveCourseTableMap(
+      NjuEntryConfig config, Map<String, dynamic> courseTableMap) async {
+    Iterable courses;
+    final rawCourses = courseTableMap['courses'];
+    if (rawCourses.runtimeType != String) {
+      courses = rawCourses;
+    } else if (json.decode(rawCourses).runtimeType != String) {
+      courses = json.decode(rawCourses);
+    } else {
+      courses = json.decode(json.decode(rawCourses));
+    }
+    final coursesMap = List<Map<String, dynamic>>.from(courses);
+
+    final courseTable =
+        await _courseTableProvider.insert(CourseTable(courseTableMap['name']));
+    final tableId = courseTable.id!;
+
+    if (mounted) {
+      await ScopedModel.of<MainStateModel>(context).changeclassTable(tableId);
+    }
+
+    for (final courseMap in coursesMap) {
+      final dbMap =
+          CourseImportCodec.onlineCourseToDbMap(courseMap, tableId: tableId);
+      final course = Course.fromMap(dbMap);
+      await _courseProvider.insert(course);
+    }
+
+    await _courseTableProvider.updateCheckUpdateInfo(
+      tableId,
+      sourceSchoolPinyin: config.pinyin,
+      lastSnapshot: json.encode(coursesMap),
+      lastCheckedAt: DateTime.now().toIso8601String(),
+    );
+
+    await _maybeRequestBatteryOptimizationExemption();
+
+    if (!mounted) return;
+    Toast.showToast('导入成功', context);
+    Navigator.of(context).pop(true);
+  }
+
+  /// 统一的"重置状态回到某个起始页"，默认回到 [_initialStage]（自动更新
   /// 选择页或登录表单），也可以指定具体页面（比如"新账号登录"按钮要强制
-  /// 回登录表单，不是回快捷导入选择页）。
+  /// 回登录表单，不是回自动更新选择页）。
   void _retry({_Stage? stage}) {
     setState(() {
       _stage = stage ?? _initialStage;
@@ -553,22 +527,13 @@ class _ImportViewState extends State<ImportView> {
     switch (_stage) {
       case _Stage.checkingPriorLogin:
         return const Center(child: CircularProgressIndicator());
-      case _Stage.quickImportChoice:
-        return _buildQuickImportChoice(context);
+      case _Stage.autoUpdateChoice:
+        return _buildAutoUpdateChoice(context);
       case _Stage.loginForm:
         return _buildLoginForm(context);
       case _Stage.loggingIn:
       case _Stage.fetching:
-        return Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const CircularProgressIndicator(),
-              const SizedBox(height: 16),
-              Text(_statusText),
-            ],
-          ),
-        );
+        return _buildProgressOverWebView(context);
       case _Stage.needManualLogin:
         return Column(children: [
           Padding(
@@ -609,33 +574,65 @@ class _ImportViewState extends State<ImportView> {
     }
   }
 
-  Widget _buildQuickImportChoice(BuildContext context) {
+  /// 登录/抓取过程中的转圈界面。
+  ///
+  /// WebView 是铺在底下、被不透明遮罩盖住的，不是多余的：自动登录脚本回放
+  /// 滑块轨迹用的是 `requestAnimationFrame`，而 rAF 只有在 WebView 真的挂进
+  /// 视图树、参与合成的时候才会触发。要是这里只挂一个转圈指示器、把 WebView
+  /// 留在树外，轨迹回放会一直卡住，直到 [_beginLogin] 的超时把流程推走。
+  Widget _buildProgressOverWebView(BuildContext context) {
+    final progress = Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const CircularProgressIndicator(),
+          const SizedBox(height: 16),
+          Text(_statusText),
+        ],
+      ),
+    );
+    final controller = _webViewController;
+    if (controller == null) return progress;
+    return Stack(
+      children: [
+        Positioned.fill(child: WebViewWidget(controller: controller)),
+        Positioned.fill(
+          child: Container(
+            color: Theme.of(context).scaffoldBackgroundColor,
+            child: progress,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildAutoUpdateChoice(BuildContext context) {
+    final maskedUsername = _maskUsername(_usernameController.text.trim());
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(24),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text('检测到之前登录过南大账号', style: TextStyle(fontSize: 16)),
+            Text('已记住账号 $maskedUsername', style: const TextStyle(fontSize: 16)),
             const SizedBox(height: 8),
             const Text(
-              '"快捷导入"会尝试直接复用上次的登录状态，不需要重新输入账号密码；\n'
-              '如果登录状态已经失效，会提示失败原因，再用"新账号登录"重新登录即可。',
+              '"自动更新"会用记住的账号密码重新登录一次，再抓取最新课表，\n'
+              '整个过程不需要你操作；只有在出现图形验证码的时候才会\n'
+              '把登录页显示出来让你手动完成。\n'
+              '换账号请选"新账号登录"。',
               textAlign: TextAlign.center,
               style: TextStyle(color: Colors.grey),
             ),
             const SizedBox(height: 24),
             ElevatedButton.icon(
-              onPressed: _tryQuickImport,
-              icon: const Icon(Icons.flash_on),
-              label: const Text('快捷导入'),
+              onPressed: _startAutoUpdate,
+              icon: const Icon(Icons.sync),
+              label: const Text('自动更新'),
             ),
             const SizedBox(height: 12),
             OutlinedButton.icon(
-              onPressed: () {
-                _quickImportMode = false;
-                _retry(stage: _Stage.loginForm);
-              },
+              onPressed: () => _retry(stage: _Stage.loginForm),
               icon: const Icon(Icons.person_outline),
               label: const Text('新账号登录'),
             ),
@@ -645,17 +642,30 @@ class _ImportViewState extends State<ImportView> {
     );
   }
 
-  /// 不填账号密码，直接拿之前登录时留下的 WebView 会话去访问登录地址——
-  /// 如果 Cookie 还有效，统一认证会跳过登录表单直接放行；如果已经失效，
-  /// 会被弹回登录页，[_onPageFinished] 在 [_quickImportMode] 下会明确
-  /// 报错，不自动退化成完整登录流程。跟普通登录共用同一套底层机制。
-  void _tryQuickImport() {
-    _quickImportMode = true;
+  /// 学号中间打码，只是让用户确认"是不是这个账号"，不用把完整学号亮在
+  /// 屏幕上。太短的就整个遮掉，免得反而暴露。
+  static String _maskUsername(String username) {
+    if (username.length <= 4) return '*' * username.length;
+    return '${username.substring(0, 2)}'
+        '${'*' * (username.length - 4)}'
+        '${username.substring(username.length - 2)}';
+  }
+
+  /// 拿存下来的账号密码重跑一遍完整登录，跟手输账密走的是同一条链路
+  /// （[_beginLogin] -> 注入脚本填表过滑块 -> 命中目标页抓取），区别
+  /// 只是用户不用再输一遍。
+  void _startAutoUpdate() {
+    if (_usernameController.text.trim().isEmpty ||
+        _passwordController.text.isEmpty) {
+      // [_bootstrap] 已经挡过一次，正常进不来；真进来了就当没登录过。
+      _retry(stage: _Stage.loginForm);
+      return;
+    }
     setState(() {
       _stage = _Stage.loggingIn;
-      _statusText = '正在尝试复用登录状态...';
+      _statusText = '正在用记住的账号自动登录...';
     });
-    _beginLogin(NjuConfig.loginProbe, timeoutSeconds: 15);
+    _beginLogin(NjuConfig.loginProbe);
   }
 
   Widget _buildLoginForm(BuildContext context) {
@@ -680,6 +690,25 @@ class _ImportViewState extends State<ImportView> {
           ),
           const SizedBox(height: 24),
           ElevatedButton(onPressed: _submitLoginForm, child: const Text('登录')),
+          if (_usernameController.text.isNotEmpty ||
+              _passwordController.text.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            TextButton(
+              onPressed: () async {
+                await NjuCredentialStore.clear();
+                if (!mounted) return;
+                setState(() {
+                  _usernameController.clear();
+                  _passwordController.clear();
+                  // 账号密码没了，自动更新就没得可用，重试的落点也要跟着
+                  // 改回登录表单，不然会弹回一个点了就跳走的选择页。
+                  _initialStage = _Stage.loginForm;
+                });
+                Toast.showToast('已清除记住的账号密码', context);
+              },
+              child: const Text('清除已记住的账号密码'),
+            ),
+          ],
         ],
       ),
     );
@@ -690,7 +719,21 @@ class _ImportViewState extends State<ImportView> {
       children: [
         Padding(
           padding: const EdgeInsets.all(16),
-          child: ElevatedButton(onPressed: _retry, child: const Text('重试')),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              ElevatedButton(onPressed: _retry, child: const Text('重试')),
+              // 自动更新失败最常见的原因就是密码在学校那边改过了，重试
+              // 多少次都是同样的结果，得给一条换账号密码的出路。
+              if (_initialStage == _Stage.autoUpdateChoice) ...[
+                const SizedBox(width: 12),
+                OutlinedButton(
+                  onPressed: () => _retry(stage: _Stage.loginForm),
+                  child: const Text('重新输入账号密码'),
+                ),
+              ],
+            ],
+          ),
         ),
         Expanded(
           child: SingleChildScrollView(
