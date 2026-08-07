@@ -283,7 +283,7 @@ class S {
   /// `确认隐藏自由时间课程？\n您可在[设置]-[自定义选项]-[显示自由时间课程]选项中再次启用显示该模块～`
   String get hide_free_class_dialog_content {
     return Intl.message(
-      '确认隐藏自由时间课程？\n您可在[设置]-[自定义选项]-[显示自由时间课程]选项中再次启用显示该模块～',
+      '确认隐藏自由时间课程？\n您可在[设置]-[更多设置]-[显示自由时间课程]选项中再次启用显示该模块～',
       name: 'hide_free_class_dialog_content',
       desc: '',
       args: [],
@@ -493,7 +493,7 @@ class S {
   /// `添加或删除课表数据`
   String get manage_table_subtitle {
     return Intl.message(
-      '添加或删除课表数据',
+      '添加、删除课表，或检查课表更新',
       name: 'manage_table_subtitle',
       desc: '',
       args: [],
@@ -653,7 +653,7 @@ class S {
   /// `自定义选项`
   String get more_settings_title {
     return Intl.message(
-      '自定义选项',
+      '更多设置',
       name: 'more_settings_title',
       desc: '',
       args: [],
@@ -663,7 +663,7 @@ class S {
   /// `课表样式设置，高级设置与试验功能`
   String get more_settings_subtitle {
     return Intl.message(
-      '课表样式设置，高级设置与试验功能',
+      '颜色、背景与课表显示选项',
       name: 'more_settings_subtitle',
       desc: '',
       args: [],
@@ -683,7 +683,7 @@ class S {
   /// `如果背景图片是暗色的话`
   String get white_title_mode_subtitle {
     return Intl.message(
-      '如果背景图片是暗色的话',
+      '背景图片较暗时开启，让标题文字更清晰',
       name: 'white_title_mode_subtitle',
       desc: '',
       args: [],

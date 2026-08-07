@@ -14,14 +14,13 @@ import '../Import/ImportView.dart';
 import '../Lecture/LecturesView.dart';
 import '../About/AboutView.dart';
 import '../AddCourse/AddCourseView.dart';
-import 'MoreSettingsView.dart';
+import 'AppearanceSettingsView.dart';
+import 'ScheduleDisplaySettingsView.dart';
 import 'WidgetSettingsView.dart';
 import '../Share/ShareView.dart';
 import '../../Components/Toast.dart';
 import '../../Resources/Config.dart';
 import '../../Resources/Url.dart';
-
-import 'Widgets/WeekChanger.dart';
 
 class SettingsView extends StatefulWidget {
   const SettingsView({Key? key}) : super(key: key);
@@ -42,17 +41,10 @@ class _SettingsViewState extends State<SettingsView> {
       body: SafeArea(
           child: SingleChildScrollView(
               child: Column(
-                  children: ListTile.divideTiles(context: context, tiles: [
-        ListTile(
-          title: Text(S.of(context).import_manually_title),
-          subtitle: Text(S.of(context).import_manually_subtitle),
-          onTap: () {
-            UmengCommonSdk.onEvent(
-                "class_import", {"type": "manual", "action": "show"});
-            Navigator.of(context).push(MaterialPageRoute(
-                builder: (BuildContext context) => const AddView()));
-          },
-        ),
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+            _sectionHeader(context, '课表数据', first: true),
+            ...ListTile.divideTiles(context: context, tiles: [
         ListTile(
           title: Text(S.of(context).import_title),
           subtitle: Text(S.of(context).import_subtitle),
@@ -63,6 +55,11 @@ class _SettingsViewState extends State<SettingsView> {
                 builder: (BuildContext context) => const ImportView()));
             if (status == true) Navigator.of(context).pop(status);
           },
+        ),
+        ListTile(
+          title: const Text('添加课程'),
+          subtitle: const Text('手动填写课程信息，或从讲座列表快捷添加'),
+          onTap: () => _showAddCourseChoices(context),
         ),
         //TODO: 全校课程
         // ListTile(
@@ -77,17 +74,6 @@ class _SettingsViewState extends State<SettingsView> {
         //     if (status == true) Navigator.of(context).pop(status);
         //   },
         // ),
-        ListTile(
-          title: Text(S.of(context).view_lecture_title),
-          subtitle: Text(S.of(context).view_lecture_subtitle),
-          onTap: () async {
-            UmengCommonSdk.onEvent(
-                "class_import", {"type": "lecture", "action": "show"});
-            bool? status = await Navigator.of(context).push(MaterialPageRoute(
-                builder: (BuildContext context) => const LectureView()));
-            if (status == true) Navigator.of(context).pop(status);
-          },
-        ),
         // ListTile(
         //   title: Text(S.of(context).import_from_NJU_title),
         //   subtitle: Text(S.of(context).import_from_NJU_subtitle),
@@ -121,15 +107,6 @@ class _SettingsViewState extends State<SettingsView> {
         //   },
         // ),
         ListTile(
-          title: Text(S.of(context).import_or_export_title),
-          subtitle: Text(S.of(context).import_or_export_subtitle),
-          onTap: () {
-            UmengCommonSdk.onEvent("qr_import", {"action": "show"});
-            Navigator.of(context).push(MaterialPageRoute(
-                builder: (BuildContext context) => const ShareView()));
-          },
-        ),
-        ListTile(
           title: Text(S.of(context).manage_table_title),
           subtitle: Text(S.of(context).manage_table_subtitle),
           onTap: () {
@@ -139,12 +116,35 @@ class _SettingsViewState extends State<SettingsView> {
           },
         ),
         ListTile(
-          title: Text(S.of(context).more_settings_title),
-          subtitle: Text(S.of(context).more_settings_subtitle),
+          title: const Text('分享与备份课表'),
+          subtitle: Text(S.of(context).import_or_export_subtitle),
           onTap: () {
-            UmengCommonSdk.onEvent("more_setting", {"action": "show"});
+            UmengCommonSdk.onEvent("qr_import", {"action": "show"});
             Navigator.of(context).push(MaterialPageRoute(
-                builder: (BuildContext context) => const MoreSettingsView()));
+                builder: (BuildContext context) => const ShareView()));
+          },
+        ),
+            ]).toList(),
+            _sectionHeader(context, '外观'),
+            ...ListTile.divideTiles(context: context, tiles: [
+        ListTile(
+          title: const Text('外观设置'),
+          subtitle: const Text('浅色/深色模式、课程颜色、强调色、背景图片'),
+          onTap: () {
+            UmengCommonSdk.onEvent("appearance_setting", {"action": "show"});
+            Navigator.of(context).push(MaterialPageRoute(
+                builder: (BuildContext context) =>
+                    const AppearanceSettingsView()));
+          },
+        ),
+        ListTile(
+          title: const Text('课表显示设置'),
+          subtitle: const Text('周末、课程时间、自由时间课程等显示选项，强制缩放'),
+          onTap: () {
+            UmengCommonSdk.onEvent("schedule_display", {"action": "show"});
+            Navigator.of(context).push(MaterialPageRoute(
+                builder: (BuildContext context) =>
+                    const ScheduleDisplaySettingsView()));
           },
         ),
         // Widget settings - iOS only
@@ -160,7 +160,9 @@ class _SettingsViewState extends State<SettingsView> {
                       const WidgetSettingsView()));
             },
           ),
-        const WeekChanger(),
+            ]).toList(),
+            _sectionHeader(context, '关于与支持'),
+            ...ListTile.divideTiles(context: context, tiles: [
         ListTile(
           title: Text(S.of(context).share_title),
           subtitle: Text(S.of(context).share_subtitle),
@@ -242,7 +244,82 @@ class _SettingsViewState extends State<SettingsView> {
                 builder: (BuildContext context) => const AboutView()));
           },
         )
-      ]).toList()))),
+            ]).toList(),
+          ]))),
+    );
+  }
+
+  /// 分组标题：用一段留白色带（不是单纯一条细线）把上一组内容"隔开"，
+  /// 效果接近 iOS 设置里那种分组间灰色缝隙，跟组内条目之间的细分割线
+  /// 明显不一样，看一眼就知道是新的一组，不是粘在上一条目下面。
+  Widget _sectionHeader(BuildContext context, String title,
+          {bool first = false}) =>
+      Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (!first)
+            Container(
+              height: 16,
+              color: Theme.of(context).colorScheme.surfaceContainerHighest,
+            ),
+          Padding(
+            padding: EdgeInsets.fromLTRB(16, first ? 16 : 12, 16, 8),
+            child: Text(
+              title,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.5,
+                color: Theme.of(context).colorScheme.primary,
+              ),
+            ),
+          ),
+        ],
+      );
+
+  /// "添加课程"合并了原来两个独立入口——手动填写（自己录一条课程）和
+  /// 讲座列表（从已知的讲座里选一个快捷带数据添加）。两者都是"往课表加
+  /// 一条记录"，只是数据从哪来不一样，所以合并成一个入口、点开再选，
+  /// 而不是继续在设置页平铺两条。
+  Future<void> _showAddCourseChoices(BuildContext context) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.edit_note),
+              title: Text(S.of(context).import_manually_title),
+              subtitle: Text(S.of(context).import_manually_subtitle),
+              onTap: () {
+                Navigator.of(context).pop();
+                UmengCommonSdk.onEvent(
+                    "class_import", {"type": "manual", "action": "show"});
+                Navigator.of(context).push(MaterialPageRoute(
+                    builder: (BuildContext context) => const AddView()));
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.campaign_outlined),
+              title: Text(S.of(context).view_lecture_title),
+              subtitle: Text(S.of(context).view_lecture_subtitle),
+              onTap: () async {
+                Navigator.of(context).pop();
+                UmengCommonSdk.onEvent(
+                    "class_import", {"type": "lecture", "action": "show"});
+                bool? status = await Navigator.of(context).push(
+                    MaterialPageRoute(
+                        builder: (BuildContext context) =>
+                            const LectureView()));
+                if (status == true && context.mounted) {
+                  Navigator.of(context).pop(status);
+                }
+              },
+            ),
+          ],
+        ),
+      ),
     );
   }
 
