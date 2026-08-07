@@ -1,12 +1,12 @@
 import '../../../generated/l10n.dart';
 import 'package:flutter/material.dart';
 import '../../../Models/CourseModel.dart';
-import '../../../Resources/Config.dart';
 import '../../../Utils/ColorUtil.dart';
 
 class CourseWidget extends StatelessWidget {
   final Course course;
   final String color;
+  final String mutedColor;
   final double height;
   final double width;
   final bool isActive;
@@ -14,8 +14,8 @@ class CourseWidget extends StatelessWidget {
   final GestureTapCallback? onTap;
   final GestureLongPressCallback? onLongPress;
 
-  const CourseWidget(this.course, this.color, this.height, this.width,
-      this.isActive, this.setFlag, this.onTap, this.onLongPress,
+  const CourseWidget(this.course, this.color, this.mutedColor, this.height,
+      this.width, this.isActive, this.setFlag, this.onTap, this.onLongPress,
       {Key? key})
       : super(key: key);
 
@@ -30,8 +30,7 @@ class CourseWidget extends StatelessWidget {
       width: width,
       child: Container(
         decoration: BoxDecoration(
-          color: HexColor(isActive ? color : Config.HIDE_CLASS_COLOR)
-              .withOpacity(0.9),
+          color: HexColor(isActive ? color : mutedColor).withOpacity(0.9),
           // TODO: Needs to be improved
           borderRadius: setFlag
               ? const BorderRadius.only(

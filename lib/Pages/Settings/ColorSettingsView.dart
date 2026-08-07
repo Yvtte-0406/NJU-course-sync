@@ -36,6 +36,8 @@ class _ColorSettingsViewState extends State<ColorSettingsView> {
   ActiveColorPool? _activePool;
   List<_ColorGroup> _groups = [];
   final Map<int, String> _pendingChanges = {};
+  String _mutedColor = '';
+  bool _mutedColorIsCustom = false;
 
   @override
   void initState() {
@@ -50,6 +52,7 @@ class _ColorSettingsViewState extends State<ColorSettingsView> {
         .getClassTable();
     final scheme = await ColorPool.getActiveScheme();
     final pool = await ColorPool.getActivePool();
+    final mutedOverride = await ColorPool.getMutedColorOverride();
 
     final rawCourses = await _courseProvider.getAllCourses(tableId);
     final courses =
@@ -72,8 +75,38 @@ class _ColorSettingsViewState extends State<ColorSettingsView> {
       _activePool = pool;
       _groups = groups;
       _pendingChanges.clear();
+      _mutedColor = mutedOverride ?? scheme.mutedColor;
+      _mutedColorIsCustom = mutedOverride != null;
       _loading = false;
     });
+  }
+
+  Future<void> _editMutedColor() async {
+    final scheme = await ColorPool.getActiveScheme();
+    final picked = await showCourseColorPickerSheet(
+      context: context,
+      initialColor: _mutedColor,
+      presetColors: _activePool?.palette ?? scheme.colors,
+    );
+    if (picked == null) return;
+    await ColorPool.setMutedColorOverride(picked);
+    if (!mounted) return;
+    setState(() {
+      _mutedColor = picked;
+      _mutedColorIsCustom = true;
+    });
+    Toast.showToast('已设置非本周课程颜色', context);
+  }
+
+  Future<void> _resetMutedColor() async {
+    await ColorPool.clearMutedColorOverride();
+    final scheme = await ColorPool.getActiveScheme();
+    if (!mounted) return;
+    setState(() {
+      _mutedColor = scheme.mutedColor;
+      _mutedColorIsCustom = false;
+    });
+    Toast.showToast('已恢复方案默认的非本周课程颜色', context);
   }
 
   Future<void> _applyScheme(CourseColorScheme scheme) async {
@@ -196,34 +229,64 @@ class _ColorSettingsViewState extends State<ColorSettingsView> {
   }
 
   Widget _buildCustomTab() {
-    if (_groups.isEmpty) {
-      return const Center(child: Text('当前课表没有课程。'));
-    }
     return Column(children: [
-      Expanded(
-        child: ListView.builder(
-          itemCount: _groups.length,
-          itemBuilder: (context, index) {
-            final group = _groups[index];
-            return ListTile(
-              title: Text(group.name),
-              trailing: GestureDetector(
-                onTap: () => _editGroupColor(group),
-                child: Container(
-                  width: 28,
-                  height: 28,
-                  decoration: BoxDecoration(
-                    color: HexColor(group.currentHex),
-                    shape: BoxShape.circle,
-                    border: Border.all(color: Colors.grey.shade300),
-                  ),
+      ListTile(
+        title: const Text('非本周课程颜色'),
+        subtitle: Text(_mutedColorIsCustom ? '已自定义' : '跟随当前配色方案的默认灰显色'),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (_mutedColorIsCustom)
+              TextButton(
+                onPressed: _resetMutedColor,
+                child: const Text('恢复默认'),
+              ),
+            GestureDetector(
+              onTap: _editMutedColor,
+              child: Container(
+                width: 28,
+                height: 28,
+                decoration: BoxDecoration(
+                  color: _mutedColor.isEmpty
+                      ? Colors.transparent
+                      : HexColor(_mutedColor),
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Colors.grey.shade300),
                 ),
               ),
-              onTap: () => _editGroupColor(group),
-            );
-          },
+            ),
+          ],
         ),
+        onTap: _editMutedColor,
       ),
+      const Divider(height: 1),
+      if (_groups.isEmpty)
+        const Expanded(child: Center(child: Text('当前课表没有课程。')))
+      else
+        Expanded(
+          child: ListView.builder(
+            itemCount: _groups.length,
+            itemBuilder: (context, index) {
+              final group = _groups[index];
+              return ListTile(
+                title: Text(group.name),
+                trailing: GestureDetector(
+                  onTap: () => _editGroupColor(group),
+                  child: Container(
+                    width: 28,
+                    height: 28,
+                    decoration: BoxDecoration(
+                      color: HexColor(group.currentHex),
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.grey.shade300),
+                    ),
+                  ),
+                ),
+                onTap: () => _editGroupColor(group),
+              );
+            },
+          ),
+        ),
       if (_pendingChanges.isNotEmpty)
         Padding(
           padding: const EdgeInsets.all(12),
