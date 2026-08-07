@@ -1,6 +1,5 @@
 import 'CourseModel.dart';
 import 'dart:convert';
-import '../Resources/Constant.dart';
 
 class ScheduleModel {
   int nowWeek;
@@ -36,13 +35,34 @@ class ScheduleModel {
         freeCourses.add(course);
       } else if (weeks.contains(nowWeek)) {
         activeCourses.add(course);
-      } else if (course.importType == Constant.ADD_BY_LECTURE &&
-          weeks[0] < nowWeek) {
+      } else if (_isFinished(weeks)) {
+        // 本学期已经全部上完的课直接不显示。灰显是留给"这周不上、但以后
+        // 还会上"的课的，已经结束的课再灰着占着格子只会干扰阅读。
         continue;
       } else {
         hideCourses.add(course);
       }
     }
+  }
+
+  /// 这门课在本学期是否已经全部结束：所有周次都早于当前周。
+  ///
+  /// 原先只有讲座（`ADD_BY_LECTURE`）做这个判断，而且用的是
+  /// `weeks[0] < nowWeek`——讲座一般只排一个周次，取第一个碰巧等价于取
+  /// 全部，但普通课程的 `weeks[0]` 是开课第一周，几乎总是小于当前周，
+  /// 照搬会把整学期的课全部误判成"已结束"。所以这里改成看最大周次。
+  ///
+  /// 取不到任何有效周次时返回 false（照常显示），宁可多显示也不要因为
+  /// 数据异常把课悄悄藏起来。
+  bool _isFinished(List weeks) {
+    bool sawValidWeek = false;
+    for (final raw in weeks) {
+      final int? week = raw is int ? raw : int.tryParse(raw.toString());
+      if (week == null) continue;
+      sawValidWeek = true;
+      if (week >= nowWeek) return false;
+    }
+    return sawValidWeek;
   }
 
 //  void deduplication(List<Course> courses, int nowWeek) {
