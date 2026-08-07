@@ -6,6 +6,7 @@ import '../../Models/CourseTableModel.dart';
 import '../../Utils/States/MainState.dart';
 import '../../Components/Toast.dart';
 import '../CheckUpdate/CheckUpdateView.dart';
+import '../Settings/Widgets/WeekChanger.dart';
 import 'Widgets/AddDialog.dart';
 import 'Widgets/DelDialog.dart';
 
@@ -46,7 +47,11 @@ class _ManageTableViewState extends State<ManageTableView> {
             ]),
         body: SafeArea(
             child: SingleChildScrollView(
-                child: FutureBuilder<List<Widget>>(
+                child: Column(
+              children: [
+                const WeekChanger(),
+                const Divider(height: 1),
+                FutureBuilder<List<Widget>>(
                     future: _getData(context),
                     builder: (BuildContext context,
                         AsyncSnapshot<List<Widget>> snapshot) {
@@ -58,7 +63,9 @@ class _ManageTableViewState extends State<ManageTableView> {
                                     context: context, tiles: snapshot.data!)
                                 .toList());
                       }
-                    }))));
+                    }),
+              ],
+            ))));
   }
 
   Future<String> _addTableDialog(BuildContext context) async {
