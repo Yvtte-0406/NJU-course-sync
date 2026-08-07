@@ -91,6 +91,28 @@ class AppThemes {
         ),
       ),
 
+      // TabBar：M3 默认把选中态文字画成 colorScheme.primary，而这里 AppBar
+      // 背景本身就是强调色（见上面 appBarBg），等于强调色字画在强调色底上，
+      // 选中的那个标签会直接隐形。所以标签文字统一跟 AppBar 标题一样按背景
+      // 亮度自动取黑/白，选中用实色 + 加粗，未选中降透明度区分，不再依赖
+      // 强调色本身做区分。
+      tabBarTheme: TabBarThemeData(
+        labelColor: appBarFg,
+        unselectedLabelColor: appBarFg.withValues(alpha: 0.62),
+        indicatorColor: appBarFg,
+        indicatorSize: TabBarIndicatorSize.label,
+        // M3 会在 TabBar 底下画一条分隔线，落在有色 AppBar 上像是多出来的
+        // 断线，去掉更干净。
+        dividerColor: Colors.transparent,
+        labelStyle: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+        unselectedLabelStyle:
+            const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+        // 默认的水波纹会铺满整个标签高度、盖住文字，这里关掉，改由上面的
+        // 颜色/字重变化表达选中状态。
+        splashFactory: NoSplash.splashFactory,
+        overlayColor: WidgetStateProperty.all(Colors.transparent),
+      ),
+
       // Card
       cardTheme: CardThemeData(
         elevation: 0,

@@ -20,10 +20,16 @@ class CourseColorScheme {
   final String displayName;
   final List<String> colors;
 
+  /// 非本周课程的灰显色，跟随每套方案自己的色调（比如偏暖/偏冷），
+  /// 不是所有方案共用同一个死板的灰。用户也可以在"自定义配色"里覆盖
+  /// 这个默认值，见 [ColorPool.getEffectiveMutedColor]。
+  final String mutedColor;
+
   const CourseColorScheme({
     required this.id,
     required this.displayName,
     required this.colors,
+    required this.mutedColor,
   });
 }
 
@@ -41,6 +47,7 @@ class CourseColorSchemes {
       '#9CDE9C', '#9CDEBD', '#9CDEDE', '#9CBDDE',
       '#9C9CDE', '#BD9CDE', '#DE9CDE', '#DE9CBD',
     ],
+    mutedColor: '#CFC9C0',
   );
 
   static const CourseColorScheme morandi = CourseColorScheme(
@@ -51,6 +58,7 @@ class CourseColorSchemes {
       '#89B389', '#89B39E', '#89B3B3', '#899EB3',
       '#8989B3', '#9E89B3', '#B389B3', '#B3899E',
     ],
+    mutedColor: '#B8B4AE',
   );
 
   static const CourseColorScheme vibrant = CourseColorScheme(
@@ -61,6 +69,7 @@ class CourseColorSchemes {
       '#49D449', '#49D493', '#49D4D4', '#4993D4',
       '#4949D4', '#9349D4', '#D449D4', '#D44993',
     ],
+    mutedColor: '#B0B0B0',
   );
 
   // ===== 主色扩展方案（5 套，每套围绕 1-2 个主色向色环两侧展开，
@@ -74,6 +83,7 @@ class CourseColorSchemes {
       '#4DCBAC', '#4DB6CB', '#4D81CB', '#4D4DCB', // 中
       '#2E9E82', '#2E8B9E', '#2E5D9E', '#2E2E9E', // 深
     ],
+    mutedColor: '#AFC0C2',
   );
 
   static const CourseColorScheme earth = CourseColorScheme(
@@ -84,6 +94,7 @@ class CourseColorSchemes {
       '#CB6D4D', '#CB964D', '#CBCB4D', '#81CB4D',
       '#9E4A2E', '#9E6F2E', '#9E9E2E', '#5D9E2E',
     ],
+    mutedColor: '#C2B8AC',
   );
 
   static const CourseColorScheme autumn = CourseColorScheme(
@@ -94,6 +105,7 @@ class CourseColorSchemes {
       '#CB4D62', '#CB6D4D', '#CB964D', '#CBC14D',
       '#9E2E41', '#9E4A2E', '#9E6F2E', '#9E942E',
     ],
+    mutedColor: '#C7B7AE',
   );
 
   static const CourseColorScheme twilight = CourseColorScheme(
@@ -104,6 +116,7 @@ class CourseColorSchemes {
       '#4D77CB', '#584DCB', '#8C4DCB', '#C14DCB',
       '#2E549E', '#372E9E', '#662E9E', '#952E9E',
     ],
+    mutedColor: '#B8B4C2',
   );
 
   static const CourseColorScheme sakura = CourseColorScheme(
@@ -114,6 +127,7 @@ class CourseColorSchemes {
       '#AC4DCB', '#CB4DB6', '#CB4D81', '#CB4D58',
       '#822E9E', '#9E2E8B', '#9E2E5D', '#9E2E37',
     ],
+    mutedColor: '#C9BAC0',
   );
 
   static const List<CourseColorScheme> all = [

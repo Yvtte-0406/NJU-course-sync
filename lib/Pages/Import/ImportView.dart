@@ -10,6 +10,7 @@ import '../../Components/Toast.dart';
 import '../../Models/CourseModel.dart';
 import '../../Models/CourseTableModel.dart';
 import '../../Resources/NjuConfig.dart';
+import '../../Utils/CourseDiff.dart';
 import '../../Utils/CourseImportCodec.dart';
 import '../../Utils/NjuAutoLoginScript.dart';
 import '../../Utils/NjuCredentialStore.dart';
@@ -24,8 +25,15 @@ import '../../Utils/States/MainState.dart';
 /// 写入现有课程表模型。
 ///
 /// 账号密码从哪来分两种：第一次用要用户手输（[_Stage.loginForm]），
-/// 之后存在 [NjuCredentialStore] 里，"自动更新"直接拿它重跑同一条链路
-/// （[_Stage.autoUpdateChoice]）。
+/// 之后存在 [NjuCredentialStore] 里，进来先看到三选一的入口页
+/// （[_Stage.entryChoice]）：
+/// - "导入课程表"：拿存的账号密码重新登录，新建一张课表（原来"自动更新"
+///   的行为，名字容易让人误以为会更新已有课表，改叫这个）。
+/// - "更新当前课程表"：同样重新登录，但抓完之后不新建表，而是跟
+///   [MainStateModel] 当前显示的那张表做 diff、展示变更预览，用户确认后
+///   再落库（逻辑跟"课表管理"里的"检查更新"一致，只是从这里发起时会带上
+///   完整的自动登录链路，不依赖已有登录会话）。
+/// - "新账号登录"：强制回到手输表单，换一个账号，登录成功后新建一张表。
 ///
 /// 早期版本还有一条"快捷导入"：不输账密，直接拿 WebView 里残留的
 /// Cookie 去访问目标页。实测会话保不住（系统清后台、Cookie 过期都会让
@@ -40,12 +48,13 @@ class ImportView extends StatefulWidget {
 
 enum _Stage {
   checkingPriorLogin,
-  autoUpdateChoice,
+  entryChoice,
   loginForm,
   loggingIn,
   needManualLogin,
   debugPreFetch,
   fetching,
+  reviewingUpdate,
   error,
 }
 
@@ -64,8 +73,8 @@ class _ImportViewState extends State<ImportView> {
   final _courseProvider = CourseProvider();
 
   _Stage _stage = _Stage.checkingPriorLogin;
-  // 重试时要回到的"起始页"：之前登录过、账号密码也还在，就是自动更新
-  // 选择页，否则是登录表单。
+  // 重试时要回到的"起始页"：之前登录过、账号密码也还在，就是三选一的
+  // 入口页，否则是登录表单。
   _Stage _initialStage = _Stage.loginForm;
   String _statusText = '';
   String _errorText = '';
@@ -74,6 +83,12 @@ class _ImportViewState extends State<ImportView> {
   NjuEntryConfig? _activeConfig;
   bool _autofillAttempted = false;
   Timer? _loginTimeoutTimer;
+
+  // 本次登录成功后要做什么：新建一张表，还是更新当前显示的那张表。
+  // 由入口页按钮点了哪个决定，登录本身没有任何区别。
+  bool _updatingCurrentTable = false;
+  int? _updateTableId;
+  CourseDiffResult? _updateDiff;
 
   @override
   void initState() {
@@ -88,9 +103,9 @@ class _ImportViewState extends State<ImportView> {
 
   /// 决定进来先看到哪一页，顺便把记住的账号密码填进输入框。
   ///
-  /// 两件事必须一起做：自动更新就是拿存下来的账号密码重跑一遍登录，
-  /// 所以"之前登录过"这个标记单独成立没用——用户手动清过密码的话，
-  /// 自动更新点了也没账号可用，那就跟没登录过一样直接进登录表单。
+  /// 两件事必须一起做：入口页的两个"重新登录"按钮都是拿存下来的账号密码
+  /// 重跑一遍登录，所以"之前登录过"这个标记单独成立没用——用户手动清过
+  /// 密码的话，入口页点了也没账号可用，那就跟没登录过一样直接进登录表单。
   Future<void> _bootstrap() async {
     bool hasPrior = false;
     try {
@@ -111,7 +126,7 @@ class _ImportViewState extends State<ImportView> {
       _usernameController.text = username;
       _passwordController.text = password;
       _initialStage = hasPrior && username.isNotEmpty && password.isNotEmpty
-          ? _Stage.autoUpdateChoice
+          ? _Stage.entryChoice
           : _Stage.loginForm;
       _stage = _initialStage;
     });
@@ -164,6 +179,7 @@ class _ImportViewState extends State<ImportView> {
       Toast.showToast('请输入账号和密码', context);
       return;
     }
+    _updatingCurrentTable = false;
     setState(() {
       _stage = _Stage.loggingIn;
       _statusText = '正在登录...';
@@ -233,7 +249,11 @@ class _ImportViewState extends State<ImportView> {
         setState(() => _stage = _Stage.debugPreFetch);
         return;
       }
-      await _fetchAndImport(config);
+      if (_updatingCurrentTable) {
+        await _fetchAndUpdateCurrent(config);
+      } else {
+        await _fetchAndImport(config);
+      }
       return;
     }
 
@@ -501,9 +521,122 @@ class _ImportViewState extends State<ImportView> {
     Navigator.of(context).pop(true);
   }
 
-  /// 统一的"重置状态回到某个起始页"，默认回到 [_initialStage]（自动更新
-  /// 选择页或登录表单），也可以指定具体页面（比如"新账号登录"按钮要强制
-  /// 回登录表单，不是回自动更新选择页）。
+  /// "更新当前课程表"：抓到最新数据后不新建表，跟 [MainStateModel] 当前
+  /// 显示的那张表做 diff，进 [_Stage.reviewingUpdate] 让用户看变更预览再
+  /// 决定要不要应用——跟"课表管理"里的"检查更新"是同一套比对逻辑
+  /// （[diffCourseLists]），只是这里带了完整的自动登录链路，不依赖
+  /// 已有登录会话还没过期。
+  Future<void> _fetchAndUpdateCurrent(NjuEntryConfig config) async {
+    setState(() {
+      _activeConfig = config;
+      _stage = _Stage.fetching;
+      _statusText = '正在获取最新课表并比对...';
+    });
+
+    try {
+      final courseTableMap = await NjuEhallJsonImporter.fetchCourseTableMap(
+        _webViewController!,
+        pinyin: config.pinyin,
+      );
+
+      Iterable courses;
+      final rawCourses = courseTableMap['courses'];
+      if (rawCourses.runtimeType != String) {
+        courses = rawCourses;
+      } else if (json.decode(rawCourses).runtimeType != String) {
+        courses = json.decode(rawCourses);
+      } else {
+        courses = json.decode(json.decode(rawCourses));
+      }
+      final newCoursesMap = List<Map<String, dynamic>>.from(courses);
+
+      final tableId =
+          await ScopedModel.of<MainStateModel>(context).getClassTable();
+      final currentTable = await _courseTableProvider.getCourseTable(tableId);
+      if (currentTable == null) {
+        if (!mounted) return;
+        setState(() {
+          _stage = _Stage.error;
+          _errorText = '当前没有正在显示的课表，请先用"导入课程表"建一张。';
+        });
+        return;
+      }
+      final newCourses = newCoursesMap
+          .map((m) => Course.fromMap(
+              CourseImportCodec.onlineCourseToDbMap(m, tableId: tableId)))
+          .toList();
+
+      final oldCoursesRaw = await _courseProvider.getAllCourses(tableId);
+      final oldCourses = oldCoursesRaw
+          .map((m) => Course.fromMap(Map<String, dynamic>.from(m)))
+          .toList();
+
+      final diff = diffCourseLists(oldCourses, newCourses);
+
+      await _courseTableProvider.updateCheckUpdateInfo(
+        tableId,
+        sourceSchoolPinyin: config.pinyin,
+        lastSnapshot: json.encode(newCoursesMap),
+        lastCheckedAt: DateTime.now().toIso8601String(),
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _updateTableId = tableId;
+        _updateDiff = diff;
+        _stage = _Stage.reviewingUpdate;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _stage = _Stage.error;
+        _errorText = '课表更新失败：$e';
+      });
+    }
+  }
+
+  Future<void> _applyUpdateChanges() async {
+    final diff = _updateDiff!;
+    final tableId = _updateTableId!;
+
+    for (final change in diff.changedSlots) {
+      final updated = change.oldSlot;
+      updated.classroom = change.newSlot.classroom;
+      updated.info = change.newSlot.info;
+      updated.weekTime = change.newSlot.weekTime;
+      updated.startTime = change.newSlot.startTime;
+      updated.timeCount = change.newSlot.timeCount;
+      updated.weeks = change.newSlot.weeks;
+      await _courseProvider.update(updated);
+    }
+
+    for (final slot in diff.addedSlots) {
+      slot.tableId = tableId;
+      await _courseProvider.insert(slot);
+    }
+    for (final group in diff.addedCourses.values) {
+      for (final slot in group) {
+        slot.tableId = tableId;
+        await _courseProvider.insert(slot);
+      }
+    }
+
+    if (!mounted) return;
+    Toast.showToast('已更新当前课程表', context);
+    Navigator.of(context).pop(true);
+  }
+
+  Future<void> _removeUpdateSlot(Course slot) async {
+    if (slot.id != null) {
+      await _courseProvider.delete(slot.id!);
+      Toast.showToast('已删除', context);
+      setState(() {});
+    }
+  }
+
+  /// 统一的"重置状态回到某个起始页"，默认回到 [_initialStage]（三选一
+  /// 入口页或登录表单），也可以指定具体页面（比如"新账号登录"按钮要强制
+  /// 回登录表单，不是回入口页）。
   void _retry({_Stage? stage}) {
     setState(() {
       _stage = stage ?? _initialStage;
@@ -512,6 +645,9 @@ class _ImportViewState extends State<ImportView> {
       _webViewController = null;
       _activeConfig = null;
       _autofillAttempted = false;
+      _updatingCurrentTable = false;
+      _updateTableId = null;
+      _updateDiff = null;
     });
   }
 
@@ -527,8 +663,8 @@ class _ImportViewState extends State<ImportView> {
     switch (_stage) {
       case _Stage.checkingPriorLogin:
         return const Center(child: CircularProgressIndicator());
-      case _Stage.autoUpdateChoice:
-        return _buildAutoUpdateChoice(context);
+      case _Stage.entryChoice:
+        return _buildEntryChoice(context);
       case _Stage.loginForm:
         return _buildLoginForm(context);
       case _Stage.loggingIn:
@@ -562,13 +698,17 @@ class _ImportViewState extends State<ImportView> {
               ),
               const SizedBox(height: 8),
               ElevatedButton(
-                onPressed: () => _fetchAndImport(_activeConfig!),
+                onPressed: () => _updatingCurrentTable
+                    ? _fetchAndUpdateCurrent(_activeConfig!)
+                    : _fetchAndImport(_activeConfig!),
                 child: const Text('用当前页面内容抓取课表'),
               ),
             ]),
           ),
           Expanded(child: WebViewWidget(controller: _webViewController!)),
         ]);
+      case _Stage.reviewingUpdate:
+        return _buildUpdateReview(context);
       case _Stage.error:
         return _buildError(context);
     }
@@ -606,7 +746,7 @@ class _ImportViewState extends State<ImportView> {
     );
   }
 
-  Widget _buildAutoUpdateChoice(BuildContext context) {
+  Widget _buildEntryChoice(BuildContext context) {
     final maskedUsername = _maskUsername(_usernameController.text.trim());
     return Center(
       child: Padding(
@@ -617,25 +757,39 @@ class _ImportViewState extends State<ImportView> {
             Text('已记住账号 $maskedUsername', style: const TextStyle(fontSize: 16)),
             const SizedBox(height: 8),
             const Text(
-              '"自动更新"会用记住的账号密码重新登录一次，再抓取最新课表，\n'
-              '整个过程不需要你操作；只有在出现图形验证码的时候才会\n'
-              '把登录页显示出来让你手动完成。\n'
-              '换账号请选"新账号登录"。',
+              '都会用记住的账号密码重新登录一次；只有在出现图形验证码的时候\n'
+              '才会把登录页显示出来让你手动完成。',
               textAlign: TextAlign.center,
               style: TextStyle(color: Colors.grey),
             ),
             const SizedBox(height: 24),
             ElevatedButton.icon(
-              onPressed: _startAutoUpdate,
-              icon: const Icon(Icons.sync),
-              label: const Text('自动更新'),
+              onPressed: _startNewImport,
+              icon: const Icon(Icons.add),
+              label: const Text('导入课程表'),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 4),
+            const Text('抓取最新课表，新建一张课表',
+                style: TextStyle(fontSize: 12, color: Colors.grey)),
+            const SizedBox(height: 16),
+            ElevatedButton.icon(
+              onPressed: _startUpdateCurrent,
+              icon: const Icon(Icons.sync),
+              label: const Text('更新当前课程表'),
+            ),
+            const SizedBox(height: 4),
+            const Text('抓取最新课表，跟当前 App 里显示的这张表比对，\n预览变更后再决定是否应用',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 12, color: Colors.grey)),
+            const SizedBox(height: 16),
             OutlinedButton.icon(
               onPressed: () => _retry(stage: _Stage.loginForm),
               icon: const Icon(Icons.person_outline),
               label: const Text('新账号登录'),
             ),
+            const SizedBox(height: 4),
+            const Text('换一个账号登录，新建一张课表',
+                style: TextStyle(fontSize: 12, color: Colors.grey)),
           ],
         ),
       ),
@@ -653,20 +807,28 @@ class _ImportViewState extends State<ImportView> {
 
   /// 拿存下来的账号密码重跑一遍完整登录，跟手输账密走的是同一条链路
   /// （[_beginLogin] -> 注入脚本填表过滑块 -> 命中目标页抓取），区别
-  /// 只是用户不用再输一遍。
-  void _startAutoUpdate() {
+  /// 只是用户不用再输一遍。[updateCurrent] 决定登录成功后是新建一张表
+  /// 还是更新当前显示的那张（[_onPageFinished] 里据此分流）。
+  void _startWithSavedCredentials({required bool updateCurrent}) {
     if (_usernameController.text.trim().isEmpty ||
         _passwordController.text.isEmpty) {
       // [_bootstrap] 已经挡过一次，正常进不来；真进来了就当没登录过。
       _retry(stage: _Stage.loginForm);
       return;
     }
+    _updatingCurrentTable = updateCurrent;
     setState(() {
       _stage = _Stage.loggingIn;
       _statusText = '正在用记住的账号自动登录...';
     });
     _beginLogin(NjuConfig.loginProbe);
   }
+
+  void _startNewImport() =>
+      _startWithSavedCredentials(updateCurrent: false);
+
+  void _startUpdateCurrent() =>
+      _startWithSavedCredentials(updateCurrent: true);
 
   Widget _buildLoginForm(BuildContext context) {
     return Padding(
@@ -725,7 +887,7 @@ class _ImportViewState extends State<ImportView> {
               ElevatedButton(onPressed: _retry, child: const Text('重试')),
               // 自动更新失败最常见的原因就是密码在学校那边改过了，重试
               // 多少次都是同样的结果，得给一条换账号密码的出路。
-              if (_initialStage == _Stage.autoUpdateChoice) ...[
+              if (_initialStage == _Stage.entryChoice) ...[
                 const SizedBox(width: 12),
                 OutlinedButton(
                   onPressed: () => _retry(stage: _Stage.loginForm),
@@ -747,4 +909,122 @@ class _ImportViewState extends State<ImportView> {
       ],
     );
   }
+
+  /// "更新当前课程表"的变更预览，跟"课表管理"里"检查更新"的展示逻辑
+  /// 一致：新增/消失/变更分类列出，消失的课程/时间段不自动删，需要
+  /// 手动逐条确认，避免误判导致数据被悄悄清掉。
+  Widget _buildUpdateReview(BuildContext context) {
+    final diff = _updateDiff!;
+    if (diff.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('没有检测到课表变化。'),
+              const SizedBox(height: 16),
+              ElevatedButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('完成'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    final items = <Widget>[];
+
+    if (diff.addedCourses.isNotEmpty) {
+      items.add(_updateSectionTitle('新增课程'));
+      for (final entry in diff.addedCourses.entries) {
+        for (final c in entry.value) {
+          items.add(ListTile(
+            title:
+                Text(c.name ?? '', style: const TextStyle(color: Colors.green)),
+            subtitle: Text('${c.teacher ?? ''} · ${c.classroom ?? ''}'),
+          ));
+        }
+      }
+    }
+
+    if (diff.removedCourses.isNotEmpty) {
+      items.add(_updateSectionTitle('课程消失（不会自动删除，需手动确认）'));
+      for (final entry in diff.removedCourses.entries) {
+        for (final c in entry.value) {
+          items.add(ListTile(
+            title: Text(c.name ?? '', style: const TextStyle(color: Colors.red)),
+            subtitle: Text('${c.teacher ?? ''} · ${c.classroom ?? ''}'),
+            trailing: TextButton(
+                onPressed: () => _removeUpdateSlot(c), child: const Text('删除')),
+          ));
+        }
+      }
+    }
+
+    if (diff.changedSlots.isNotEmpty) {
+      items.add(_updateSectionTitle('信息变更'));
+      for (final change in diff.changedSlots) {
+        final fieldNames = {
+          'classroom': '教室',
+          'info': '备注',
+          'weekTime': '星期',
+          'startTime': '起始节次',
+          'timeCount': '节次跨度',
+          'weeks': '周次',
+        };
+        final desc = change.changedFields.entries
+            .map((e) =>
+                '${fieldNames[e.key] ?? e.key}：${e.value.key ?? ''} → ${e.value.value ?? ''}')
+            .join('\n');
+        items.add(ListTile(
+          title: Text(change.oldSlot.name ?? ''),
+          subtitle: Text(desc),
+        ));
+      }
+    }
+
+    if (diff.addedSlots.isNotEmpty) {
+      items.add(_updateSectionTitle('新增时间段'));
+      for (final c in diff.addedSlots) {
+        items.add(ListTile(
+          title:
+              Text(c.name ?? '', style: const TextStyle(color: Colors.green)),
+          subtitle:
+              Text('星期${c.weekTime} 第${c.startTime}节 · ${c.classroom ?? ''}'),
+        ));
+      }
+    }
+
+    if (diff.removedSlots.isNotEmpty) {
+      items.add(_updateSectionTitle('取消的时间段（不会自动删除，需手动确认）'));
+      for (final c in diff.removedSlots) {
+        items.add(ListTile(
+          title: Text(c.name ?? '', style: const TextStyle(color: Colors.red)),
+          subtitle:
+              Text('星期${c.weekTime} 第${c.startTime}节 · ${c.classroom ?? ''}'),
+          trailing: TextButton(
+              onPressed: () => _removeUpdateSlot(c), child: const Text('删除')),
+        ));
+      }
+    }
+
+    return Column(children: [
+      Expanded(child: ListView(children: items)),
+      Padding(
+        padding: const EdgeInsets.all(12),
+        child: ElevatedButton(
+          onPressed: _applyUpdateChanges,
+          child: const Text('应用新增/变更（不含上方需手动删除的项）'),
+        ),
+      ),
+    ]);
+  }
+
+  Widget _updateSectionTitle(String title) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+        child: Text(title,
+            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+      );
 }

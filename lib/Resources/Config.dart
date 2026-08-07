@@ -5,8 +5,6 @@ class Config {
 
   static const String default_class_table = "默认课表";
 
-  static const String HIDE_CLASS_COLOR = '#cccccc';
-
   static const String ANDROID_GROUP = '569300290';
   static const String IOS_GROUP = '493247215';
   static const String OHOS_GROUP = '921608761';

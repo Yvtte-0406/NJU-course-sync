@@ -56,6 +56,7 @@ class CourseTablePresenter {
       int nowWeek,
       bool showNonCurrentWeekCourses) async {
     ActiveColorPool colorPool = await ColorPool.getActivePool();
+    String mutedColor = await ColorPool.getEffectiveMutedColor();
 
     // Filter hideCourses based on setting
     List<Course> filteredHideCourses =
@@ -72,7 +73,8 @@ class CourseTablePresenter {
             filteredHideCourses.length,
             (int i) => CourseWidget(
                   filteredHideCourses[i],
-                  Config.HIDE_CLASS_COLOR,
+                  filteredHideCourses[i].getColor(colorPool)!,
+                  mutedColor,
                   height,
                   width,
                   false,
@@ -88,6 +90,7 @@ class CourseTablePresenter {
             (int i) => CourseWidget(
                   activeCourses[i],
                   activeCourses[i].getColor(colorPool)!,
+                  mutedColor,
                   height,
                   width,
                   true,
@@ -100,6 +103,7 @@ class CourseTablePresenter {
             (int i) => CourseWidget(
                 filteredMultiCourses[i][0],
                 filteredMultiCourses[i][0].getColor(colorPool)!,
+                mutedColor,
                 height,
                 width,
                 isThisWeek(filteredMultiCourses[i][0], nowWeek),

@@ -41,6 +41,7 @@ class ActiveColorPool {
 class ColorPool {
   static const _kColorSchemeIdKey = 'colorSchemeId';
   static const _kColorPoolKey = 'colorPool';
+  static const _kMutedColorOverrideKey = 'courseMutedColorOverride';
 
   static Future<CourseColorScheme> getActiveScheme() async {
     SharedPreferences sp = await SharedPreferences.getInstance();
@@ -100,6 +101,34 @@ class ColorPool {
     colorPool.shuffle();
     SharedPreferences sp = await SharedPreferences.getInstance();
     await sp.setString(_kColorPoolKey, json.encode(colorPool));
+  }
+
+  /// 非本周课程灰显色的用户自定义覆盖值。不设置就是 null，读取时
+  /// 退回当前方案自带的 [CourseColorScheme.mutedColor]。
+  static Future<String?> getMutedColorOverride() async {
+    SharedPreferences sp = await SharedPreferences.getInstance();
+    final v = sp.getString(_kMutedColorOverrideKey);
+    return (v == null || v.isEmpty) ? null : v;
+  }
+
+  static Future<void> setMutedColorOverride(String hex) async {
+    SharedPreferences sp = await SharedPreferences.getInstance();
+    await sp.setString(_kMutedColorOverrideKey, hex);
+  }
+
+  static Future<void> clearMutedColorOverride() async {
+    SharedPreferences sp = await SharedPreferences.getInstance();
+    await sp.remove(_kMutedColorOverrideKey);
+  }
+
+  /// 实际要用的灰显色：用户自定义过就用自定义的，没有就用当前方案的
+  /// 默认值。切换配色方案不会自动清掉自定义覆盖——跟课程颜色的自定义
+  /// 覆盖是两码事，用户是专门为"灰显色"单独设的，不该跟着方案切换丢失。
+  static Future<String> getEffectiveMutedColor() async {
+    final override = await getMutedColorOverride();
+    if (override != null) return override;
+    final scheme = await getActiveScheme();
+    return scheme.mutedColor;
   }
 }
 
