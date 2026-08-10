@@ -65,71 +65,56 @@ class ScheduleModel {
     return sawValidWeek;
   }
 
-//  void deduplication(List<Course> courses, int nowWeek) {
+  /// 把时间上互相重叠的课程归成一组挪进 [multiCourses]，并从
+  /// [activeCourses]/[hideCourses] 里摘掉——这两个列表最终只剩"独占一格"
+  /// 的课，渲染层可以直接整格画；成组的那些由渲染层横向平分格子并排画。
+  ///
+  /// 本周课和灰显课放在一起分组：两门课只要在格子上撞了就该并排显示，
+  /// 跟它们各自是不是本周的没关系。
   void deduplicate() {
-    List<Course> deduplicateResult = [];
-    List<Course> needToDelete = [];
-    bool isOverlapped = false;
-    // 分开检查的目的是保证 multiCourse 的每一个第一项有最大可能是 active 的
-    for (Course course in activeCourses) {
-      isOverlapped = false;
-      for (List<Course> checked in multiCourses) {
-        if (_checkIfOverlapping(course, checked[0])) {
-          checked.add(course);
-          _checkMultiCousesElement(checked);
-          isOverlapped = true;
-        }
+    // 传递分组：A 和 B 撞、B 和 C 撞，三门归成一组（哪怕 A 和 C 不直接
+    // 撞）。不做传递合并的话同一门课会同时落进两个组，渲染时必然重复画。
+    final List<List<Course>> groups = [];
+    for (final Course course in [...activeCourses, ...hideCourses]) {
+      final List<List<Course>> hit = groups
+          .where((group) => group.any((c) => _checkIfOverlapping(course, c)))
+          .toList();
+      if (hit.isEmpty) {
+        groups.add([course]);
+        continue;
       }
-      if (isOverlapped) continue;
-      for (Course checked in deduplicateResult) {
-        if (_checkIfOverlapping(course, checked)) {
-          multiCourses.add([course, checked]);
-          _checkMultiCousesElement(multiCourses.last);
-          deduplicateResult.remove(checked);
-          needToDelete.add(checked);
-          needToDelete.add(course);
-          isOverlapped = true;
-          break;
-        }
-      }
-      if (!isOverlapped) deduplicateResult.add(course);
-    }
-    for (Course item in needToDelete) {
-      activeCourses.remove(item);
-    }
-    needToDelete.clear();
-    for (Course course in hideCourses) {
-      isOverlapped = false;
-      for (List<Course> checked in multiCourses) {
-        if (_checkIfOverlapping(course, checked[0])) {
-          checked.add(course);
-          _checkMultiCousesElement(checked);
-          isOverlapped = true;
-          break;
-        }
-      }
-      if (isOverlapped) continue;
-      for (Course checked in deduplicateResult) {
-        if (_checkIfOverlapping(course, checked)) {
-          multiCourses.add([course, checked]);
-          _checkMultiCousesElement(multiCourses.last);
-          deduplicateResult.remove(checked);
-          needToDelete.add(checked);
-          needToDelete.add(course);
-          isOverlapped = true;
-          break;
-        }
-      }
-      if (!isOverlapped) deduplicateResult.add(course);
-    }
-    for (Course item in needToDelete) {
-      if (hideCourses.contains(item)) {
-        activeCourses.remove(item);
-      } else {
-        activeCourses.remove(item);
+      // 撞上多个已有组，说明这门课把它们连成了一片，合并成一组。
+      final List<Course> merged = hit.first..add(course);
+      for (final other in hit.skip(1)) {
+        merged.addAll(other);
+        groups.remove(other);
       }
     }
+
+    multiCourses = groups.where((group) => group.length > 1).toList();
+    for (final group in multiCourses) {
+      _sortGroup(group);
+    }
+
+    final Set<Course> grouped = multiCourses.expand((g) => g).toSet();
+    activeCourses.removeWhere((c) => grouped.contains(c));
+    hideCourses.removeWhere((c) => grouped.contains(c));
   }
+
+  /// 组内排序决定并排显示时谁在左、以及并排放不下时先牺牲谁：本周实际有
+  /// 课的排前面，同为本周的按占的节次多少排——课时长的那门信息量更大，
+  /// 优先占左边那一列。
+  void _sortGroup(List<Course> group) {
+    group.sort((a, b) {
+      final int byWeek =
+          (_isThisWeek(b) ? 1 : 0).compareTo(_isThisWeek(a) ? 1 : 0);
+      if (byWeek != 0) return byWeek;
+      return (b.timeCount ?? 0).compareTo(a.timeCount ?? 0);
+    });
+  }
+
+  bool _isThisWeek(Course course) =>
+      (json.decode(course.weeks!) as List).contains(nowWeek);
 
   bool _checkIfOverlapping(Course a, Course b) {
     bool result = a.weekTime == b.weekTime &&
@@ -139,24 +124,5 @@ class ScheduleModel {
                 b.startTime! <= a.startTime! + a.timeCount!));
 //    print(result);
     return result;
-  }
-
-  // TODO: Shit codes, may have bugs here.
-  void _checkMultiCousesElement(List<Course> multiCoursesElement) {
-    int maxCount = 0;
-    int maxIndex = 0;
-    for (int i = 0; i < multiCoursesElement.length; i++) {
-      List weeks = json.decode(multiCoursesElement[i].weeks!);
-      if (multiCoursesElement[i].timeCount! > maxCount &&
-          weeks.contains(nowWeek)) {
-        maxCount = multiCoursesElement[i].timeCount!;
-        maxIndex = i;
-      }
-    }
-    if (maxIndex != 0) {
-      Course tmp = multiCoursesElement[maxIndex];
-      multiCoursesElement[maxIndex] = multiCoursesElement[0];
-      multiCoursesElement[0] = tmp;
-    }
   }
 }

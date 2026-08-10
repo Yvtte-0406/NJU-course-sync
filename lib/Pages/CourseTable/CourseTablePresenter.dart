@@ -27,6 +27,11 @@ import 'Widgets/HideFreeCourseDialog.dart';
 import 'Widgets/CourseDeleteDialog.dart';
 import 'Widgets/CourseWidget.dart';
 
+/// 同一格子里最多并排显示几门重叠课程。超过这个数就不再平分了——分成
+/// 三列每块窄到看不清课名，不如只显示一门并占满整格，剩下的折叠成角标
+/// 让用户点开翻。
+const int _kMaxSideBySide = 2;
+
 class CourseTablePresenter {
   CourseProvider courseProvider = CourseProvider();
   List<Course> activeCourses = [];
@@ -62,13 +67,6 @@ class CourseTablePresenter {
     List<Course> filteredHideCourses =
         showNonCurrentWeekCourses ? hideCourses : [];
 
-    // Filter multiCourses - only show if the first course is for current week or setting is enabled
-    List<List<Course>> filteredMultiCourses = showNonCurrentWeekCourses
-        ? multiCourses
-        : multiCourses
-            .where((courses) => isThisWeek(courses[0], nowWeek))
-            .toList();
-
     List<Widget> result = List.generate(
             filteredHideCourses.length,
             (int i) => CourseWidget(
@@ -97,20 +95,46 @@ class CourseTablePresenter {
                   false,
                   () => showClassDialog(context, activeCourses[i], true),
                   () => showDeleteDialog(context, activeCourses[i]),
-                )) +
-        List.generate(
-            filteredMultiCourses.length,
-            (int i) => CourseWidget(
-                filteredMultiCourses[i][0],
-                filteredMultiCourses[i][0].getColor(colorPool)!,
-                mutedColor,
-                height,
-                width,
-                isThisWeek(filteredMultiCourses[i][0], nowWeek),
-                true,
-                () => showMultiClassDialog(context,
-                    multiCourses.indexOf(filteredMultiCourses[i]), nowWeek),
-                () => showDeleteDialog(context, filteredMultiCourses[i][0])));
+                ));
+
+    // 撞在同一格里的课怎么显示：
+    // - 两门：左右平分格子并排，各点各的详情。
+    // - 三门及以上：平分只会窄到看不清课名，所以只显示排在最前面那门、
+    //   占满整格，右上角画 "+N" 角标，点它翻看整组。
+    for (int groupIndex = 0; groupIndex < multiCourses.length; groupIndex++) {
+      final List<Course> group = multiCourses[groupIndex];
+      // 关掉"显示非本周课程"时，组里的灰显成员也不该露出来——不然用户
+      // 明明关了这个开关，重叠的格子里反而还看得见它们。只剩一门要显示
+      // 的话 slotCount 就是 1，照常占满整格，不会莫名其妙留半格空白。
+      final List<Course> shown = showNonCurrentWeekCourses
+          ? group
+          : group.where((c) => isThisWeek(c, nowWeek)).toList();
+      if (shown.isEmpty) continue;
+      final int visibleCount =
+          shown.length > _kMaxSideBySide ? 1 : shown.length;
+      final int hiddenCount = shown.length - visibleCount;
+      for (int slot = 0; slot < visibleCount; slot++) {
+        final Course course = shown[slot];
+        final bool isActive = isThisWeek(course, nowWeek);
+        final bool isOverflowSlot = slot == visibleCount - 1 && hiddenCount > 0;
+        result.add(CourseWidget(
+          course,
+          course.getColor(colorPool)!,
+          mutedColor,
+          height,
+          width,
+          isActive,
+          false,
+          isOverflowSlot
+              ? () => showMultiClassDialog(context, groupIndex, nowWeek)
+              : () => showClassDialog(context, course, isActive),
+          () => showDeleteDialog(context, course),
+          slotIndex: slot,
+          slotCount: visibleCount,
+          hiddenCount: isOverflowSlot ? hiddenCount : 0,
+        ));
+      }
+    }
     return result;
   }
 
