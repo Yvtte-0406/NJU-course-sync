@@ -34,12 +34,17 @@ const int _kMaxSideBySide = 2;
 
 class CourseTablePresenter {
   CourseProvider courseProvider = CourseProvider();
+  CourseTableProvider courseTableProvider = CourseTableProvider();
   List<Course> activeCourses = [];
   List<Course> hideCourses = [];
   List<List<Course>> multiCourses = [];
   List<Course> freeCourses = [];
 
+  /// 取色要用到这张表自己的配色映射，[refreshClasses] 时记下来。
+  int _tableId = 0;
+
   refreshClasses(int tableId, int nowWeek) async {
+    _tableId = tableId;
     List allCoursesMap = await courseProvider.getAllCourses(tableId);
     List<Course> allCourses = [];
     for (Map<String, dynamic> courseMap in allCoursesMap) {
@@ -60,7 +65,8 @@ class CourseTablePresenter {
       double width,
       int nowWeek,
       bool showNonCurrentWeekCourses) async {
-    ActiveColorPool colorPool = await ColorPool.getActivePool();
+    ActiveColorPool colorPool = (await ColorPool.getActivePool())
+        .withTableColors(await courseTableProvider.getCourseColors(_tableId));
     String mutedColor = await ColorPool.getEffectiveMutedColor();
 
     // Filter hideCourses based on setting

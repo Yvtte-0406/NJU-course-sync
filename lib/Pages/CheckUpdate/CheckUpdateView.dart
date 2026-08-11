@@ -6,9 +6,12 @@ import '../../Components/Toast.dart';
 import '../../Models/CourseModel.dart';
 import '../../Models/CourseTableModel.dart';
 import '../../Resources/NjuConfig.dart';
+import '../../Utils/ColorUtil.dart';
 import '../../Utils/CourseDiff.dart';
 import '../../Utils/CourseImportCodec.dart';
+import '../../Utils/MissingCourseSweeper.dart';
 import '../../Utils/NjuEhallJsonImporter.dart';
+import '../../Utils/SemesterCode.dart';
 
 /// "检查更新"页面：复用已登录 WebView，通过 [NjuEhallJsonImporter] 读取
 /// eHall JSON，
@@ -36,6 +39,7 @@ class _CheckUpdateViewState extends State<CheckUpdateView> {
   Timer? _sessionTimeoutTimer;
 
   CourseDiffResult? _diff;
+  MissingSweepResult? _sweep;
 
   @override
   void initState() {
@@ -143,6 +147,36 @@ class _CheckUpdateViewState extends State<CheckUpdateView> {
         courses = json.decode(json.decode(rawCourses));
       }
       final newCoursesMap = List<Map<String, dynamic>>.from(courses);
+
+      // 一门课都没抓到 = 抓取失败，不是"全学期停课了"。不拦掉的话每门课都
+      // 会被判成消失，两轮之后全部删光。
+      if (newCoursesMap.isEmpty) {
+        if (!mounted) return;
+        setState(() {
+          _stage = _Stage.unsupported;
+          _message = '这次没有抓到任何课程，判定为抓取失败，已跳过本轮检查，'
+              '课表没有任何改动。请稍后重试。';
+        });
+        return;
+      }
+
+      final fetchedSemester = (courseTableMap['semesterCode'] ?? '').toString();
+      final verdict = compareSemesterCode(
+        await _courseTableProvider.getSemesterCode(widget.tableId),
+        fetchedSemester,
+      );
+      if (verdict == SemesterVerdict.changed) {
+        // 换学期了就不该在这张表上做"更新"——上学期和这学期的课逐条比对
+        // 只会得到一堆新增和消失。这个页面没有建表能力，指路给导入页。
+        if (!mounted) return;
+        setState(() {
+          _stage = _Stage.unsupported;
+          _message = '教务系统已经是新的学期了，这张课表属于上一个学期。\n'
+              '请到"导入课程表"新建一张本学期的课表。';
+        });
+        return;
+      }
+
       final newCourses = newCoursesMap
           .map((m) => Course.fromMap(
               CourseImportCodec.onlineCourseToDbMap(m, tableId: widget.tableId)))
@@ -154,15 +188,25 @@ class _CheckUpdateViewState extends State<CheckUpdateView> {
 
       final diff = diffCourseLists(oldCourses, newCourses);
 
+      // 消失的课当场按两轮宽限期处理，不等用户确认；结果在预览页里告知。
+      final sweep = await sweepMissingCourses(
+        provider: _courseProvider,
+        oldCourses: oldCourses,
+        diff: diff,
+      );
+
       // 无论用户是否应用变更，都记录一次检查时间和最新抓取结果，供以后参考。
       await _courseTableProvider.updateCheckUpdateInfo(
         widget.tableId,
+        semesterCode: fetchedSemester,
         lastSnapshot: json.encode(newCoursesMap),
         lastCheckedAt: DateTime.now().toIso8601String(),
       );
 
+      if (!mounted) return;
       setState(() {
         _diff = diff;
+        _sweep = sweep;
         _stage = _Stage.reviewing;
       });
     } catch (e) {
@@ -187,28 +231,27 @@ class _CheckUpdateViewState extends State<CheckUpdateView> {
       await _courseProvider.update(updated);
     }
 
+    final inserted = <Course>[];
     for (final slot in diff.addedSlots) {
       slot.tableId = widget.tableId;
-      await _courseProvider.insert(slot);
+      inserted.add(await _courseProvider.insert(slot));
     }
     for (final group in diff.addedCourses.values) {
       for (final slot in group) {
         slot.tableId = widget.tableId;
-        await _courseProvider.insert(slot);
+        inserted.add(await _courseProvider.insert(slot));
       }
+    }
+    // 把新课程的颜色固定进课表级映射，之后被删掉又加回来时颜色不变。
+    if (inserted.isNotEmpty) {
+      final pool = await ColorPool.getActivePool();
+      await _courseTableProvider.mergeCourseColors(
+          widget.tableId, paletteColorEntries(inserted, pool));
     }
 
     if (mounted) {
       Toast.showToast('已应用课表变更', context);
       setState(() => _stage = _Stage.applied);
-    }
-  }
-
-  Future<void> _removeSlot(Course slot) async {
-    if (slot.id != null) {
-      await _courseProvider.delete(slot.id!);
-      Toast.showToast('已删除', context);
-      setState(() {});
     }
   }
 
@@ -245,11 +288,24 @@ class _CheckUpdateViewState extends State<CheckUpdateView> {
 
   Widget _buildReview(BuildContext context) {
     final diff = _diff!;
+    final sweepSummary = _sweep?.summary;
     if (diff.isEmpty) {
-      return const Center(child: Text('没有检测到课表变化。'));
+      return Center(
+          child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Text(sweepSummary ?? '没有检测到课表变化。',
+                  textAlign: TextAlign.center)));
     }
 
     final items = <Widget>[];
+
+    if (sweepSummary != null) {
+      items.add(Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+        child: Text(sweepSummary,
+            style: TextStyle(color: Theme.of(context).colorScheme.primary)),
+      ));
+    }
 
     if (diff.addedCourses.isNotEmpty) {
       items.add(_sectionTitle('新增课程'));
@@ -264,14 +320,12 @@ class _CheckUpdateViewState extends State<CheckUpdateView> {
     }
 
     if (diff.removedCourses.isNotEmpty) {
-      items.add(_sectionTitle('课程消失（不会自动删除，需手动确认）'));
+      items.add(_sectionTitle('学校数据里没找到（已从课表隐藏）'));
       for (final entry in diff.removedCourses.entries) {
         for (final c in entry.value) {
           items.add(ListTile(
             title: Text(c.name ?? '', style: const TextStyle(color: Colors.red)),
             subtitle: Text('${c.teacher ?? ''} · ${c.classroom ?? ''}'),
-            trailing: TextButton(
-                onPressed: () => _removeSlot(c), child: const Text('删除')),
           ));
         }
       }
@@ -310,13 +364,11 @@ class _CheckUpdateViewState extends State<CheckUpdateView> {
     }
 
     if (diff.removedSlots.isNotEmpty) {
-      items.add(_sectionTitle('取消的时间段（不会自动删除，需手动确认）'));
+      items.add(_sectionTitle('取消的时间段（已从课表隐藏）'));
       for (final c in diff.removedSlots) {
         items.add(ListTile(
           title: Text(c.name ?? '', style: const TextStyle(color: Colors.red)),
           subtitle: Text('星期${c.weekTime} 第${c.startTime}节 · ${c.classroom ?? ''}'),
-          trailing: TextButton(
-              onPressed: () => _removeSlot(c), child: const Text('删除')),
         ));
       }
     }
@@ -327,7 +379,7 @@ class _CheckUpdateViewState extends State<CheckUpdateView> {
         padding: const EdgeInsets.all(12),
         child: ElevatedButton(
           onPressed: _applyChanges,
-          child: const Text('应用新增/变更（不含上方需手动删除的项）'),
+          child: const Text('应用新增与变更'),
         ),
       ),
     ]);

@@ -31,11 +31,21 @@ class HexColor extends Color {
 /// `ColorPool` 负责保证这一点，比如方案色板扩容后会自动重新洗牌）。
 /// `Course.getColor()` 就是靠 `palette[indices[courseId % indices.length]]`
 /// 算出某门课具体是哪个颜色。
+///
+/// `tableColors` 是某一张课表额外记下来的"这门课固定用这个颜色"，键是
+/// `Course.groupKey`。它让颜色跟着课程走而不是跟着数据库行走——课程在
+/// 更新中被删掉又加回来时，行号变了颜色也不变。空表示这张课表还没记过，
+/// 此时行为与从前完全一致。
 class ActiveColorPool {
   final List<int> indices;
   final List<String> palette;
+  final Map<String, String> tableColors;
 
-  const ActiveColorPool(this.indices, this.palette);
+  const ActiveColorPool(this.indices, this.palette,
+      {this.tableColors = const {}});
+
+  ActiveColorPool withTableColors(Map<String, String> colors) =>
+      ActiveColorPool(indices, palette, tableColors: colors);
 }
 
 class ColorPool {

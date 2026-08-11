@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:scoped_model/scoped_model.dart';
 import '../../Models/CourseModel.dart';
+import '../../Models/CourseTableModel.dart';
 import '../../Resources/ColorSchemes.dart';
 import '../../Utils/ColorUtil.dart';
 import '../../Utils/States/MainState.dart';
@@ -30,6 +31,7 @@ class _ColorGroup {
 
 class _ColorSettingsViewState extends State<ColorSettingsView> {
   final CourseProvider _courseProvider = CourseProvider();
+  final CourseTableProvider _courseTableProvider = CourseTableProvider();
 
   bool _loading = true;
   int _tableId = 0;
@@ -51,7 +53,8 @@ class _ColorSettingsViewState extends State<ColorSettingsView> {
             rebuildOnChange: false)
         .getClassTable();
     final scheme = await ColorPool.getActiveScheme();
-    final pool = await ColorPool.getActivePool();
+    final pool = (await ColorPool.getActivePool())
+        .withTableColors(await _courseTableProvider.getCourseColors(tableId));
     final mutedOverride = await ColorPool.getMutedColorOverride();
 
     final rawCourses = await _courseProvider.getAllCourses(tableId);
@@ -130,6 +133,10 @@ class _ColorSettingsViewState extends State<ColorSettingsView> {
     if (confirmed != true) return;
 
     await ColorPool.setActiveScheme(scheme.id);
+
+    // 课表级配色映射会把每门课钉在旧方案的颜色上，不清掉的话换了方案也
+    // 看不到任何变化。清空后课程回到"按色板分配"，下次更新再重新固定。
+    await _courseTableProvider.clearCourseColors(_tableId);
 
     final rawCourses = await _courseProvider.getAllCourses(_tableId);
     for (final m in rawCourses) {
