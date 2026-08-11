@@ -184,6 +184,9 @@ class NjuEhallJsonImporter {
     }
     return {
       'name': _nonEmpty(semester['MC'], semester['DM']),
+      // 学期代码单独输出一份：显示名可能有排版差异，判断"是不是同一个
+      // 学期"要用学校系统给的这个稳定代码。
+      'semesterCode': _text(semester['DM']),
       'courses': courses
     };
   }
@@ -221,6 +224,8 @@ class NjuEhallJsonImporter {
     }
     return {
       'name': _nonEmpty(semester['XNXQDM_DISPLAY'], semester['XNXQDM']),
+      // 同 [_adaptUndergraduate]：研究生这边的学期代码字段叫 XNXQDM。
+      'semesterCode': _text(semester['XNXQDM']),
       'courses': courses,
     };
   }

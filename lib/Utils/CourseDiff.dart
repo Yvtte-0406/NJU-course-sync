@@ -1,4 +1,5 @@
 import '../Models/CourseModel.dart';
+import '../Resources/Constant.dart';
 
 /// 课表变更检测的纯函数 diff 引擎。
 ///
@@ -56,21 +57,27 @@ class CourseDiffResult {
       removedSlots.isEmpty;
 }
 
-/// "这是同一门课"的分组键：优先用课程编号，缺失时退回 课程名+教师。
-String courseGroupKey(Course c) {
-  final classNumber = c.classNumber?.trim() ?? '';
-  if (classNumber.isNotEmpty) {
-    return 'no:$classNumber';
-  }
-  return 'nt:${c.name ?? ''}|${c.teacher ?? ''}';
-}
+/// "这是同一门课"的分组键。实现在 [Course.groupKey]——取色也要用同一个
+/// 标识，放在这里会让课程模型反过来依赖比对引擎。
+String courseGroupKey(Course c) => c.groupKey;
 
 /// 组内一个时间段的"位置标识"：星期几。用于组内配对的第一优先级。
 int? _weekTimeOf(Course c) => c.weekTime;
 
+/// 只有系统导入的课程参与比对。
+///
+/// 手动添加的课和讲座在学校数据里根本不存在，放进来一定会被判成"消失"——
+/// 那不是更新，是误报。过滤放在引擎内部而不是交给调用方，是因为有两个入口
+/// 都会调 [diffCourseLists]（导入页的「更新当前课程表」和课表管理的
+/// 「检查更新」），靠每个调用方自己记得过滤，迟早会漏掉一个。
+List<Course> _importedOnly(List<Course> courses) =>
+    courses.where((c) => c.importType == Constant.ADD_BY_IMPORT).toList();
+
+/// 比对两份课表数据。**只比对系统导入的课程**，手动添加的课和讲座会被
+/// 忽略——它们不受学校数据增删的影响，见 [_importedOnly]。
 CourseDiffResult diffCourseLists(List<Course> oldList, List<Course> newList) {
-  final Map<String, List<Course>> oldGroups = _groupBy(oldList);
-  final Map<String, List<Course>> newGroups = _groupBy(newList);
+  final Map<String, List<Course>> oldGroups = _groupBy(_importedOnly(oldList));
+  final Map<String, List<Course>> newGroups = _groupBy(_importedOnly(newList));
 
   final addedCourses = <String, List<Course>>{};
   final removedCourses = <String, List<Course>>{};

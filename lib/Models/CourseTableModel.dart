@@ -148,6 +148,7 @@ class CourseTableProvider {
     String? lastSnapshot,
     String? lastCheckedAt,
     String? sourceSchoolPinyin,
+    String? semesterCode,
   }) async {
     final data = await _getDataMap(id);
     if (lastSnapshot != null) data['last_snapshot'] = lastSnapshot;
@@ -155,9 +156,76 @@ class CourseTableProvider {
     if (sourceSchoolPinyin != null) {
       data['source_school_pinyin'] = sourceSchoolPinyin;
     }
+    if (semesterCode != null && semesterCode.isNotEmpty) {
+      data['semester_code'] = semesterCode;
+    }
     await open();
     await db!.update(tableName, {columnData: json.encode(data)},
         where: '$columnId = ?', whereArgs: [id]);
+  }
+
+  /// 这张课表记下来的"课程 → 颜色"映射，键是 [Course.groupKey]。
+  /// 没记过就是空 Map，此时取色行为跟从前完全一致。
+  Future<Map<String, String>> getCourseColors(int id) async {
+    final data = await _getDataMap(id);
+    final raw = data['course_colors'];
+    if (raw is! Map) return <String, String>{};
+    final result = <String, String>{};
+    raw.forEach((k, v) {
+      final key = k?.toString();
+      final value = v?.toString();
+      if (key != null && key.isNotEmpty && value != null && value.isNotEmpty) {
+        result[key] = value;
+      }
+    });
+    return result;
+  }
+
+  /// 只补充还没记过的课程，已经记下的不覆盖——固定下来的颜色就不该再变，
+  /// 这正是这张映射存在的意义。返回是否真的写入了新条目。
+  Future<bool> mergeCourseColors(int id, Map<String, String> entries) async {
+    if (entries.isEmpty) return false;
+    final data = await _getDataMap(id);
+    final existing = <String, String>{};
+    final raw = data['course_colors'];
+    if (raw is Map) {
+      raw.forEach((k, v) {
+        if (k != null && v != null) existing[k.toString()] = v.toString();
+      });
+    }
+    var changed = false;
+    entries.forEach((key, value) {
+      if (key.isEmpty || value.isEmpty) return;
+      if (existing.containsKey(key)) return;
+      existing[key] = value;
+      changed = true;
+    });
+    if (!changed) return false;
+    data['course_colors'] = existing;
+    await open();
+    await db!.update(tableName, {columnData: json.encode(data)},
+        where: '$columnId = ?', whereArgs: [id]);
+    return true;
+  }
+
+  /// 清掉整张配色映射。切换配色方案时必须调用——否则映射会一直把课程钉在
+  /// 旧方案的颜色上，用户换了方案却看不到任何变化。
+  Future<void> clearCourseColors(int id) async {
+    final data = await _getDataMap(id);
+    if (!data.containsKey('course_colors')) return;
+    data.remove('course_colors');
+    await open();
+    await db!.update(tableName, {columnData: json.encode(data)},
+        where: '$columnId = ?', whereArgs: [id]);
+  }
+
+  /// 这张课表是哪个学期的（学校系统给的学期代码）。空字符串和 null 一律
+  /// 返回 null——课表建于这个字段存在之前时就是这种情况，调用方按"认不出
+  /// 学期"处理。
+  Future<String?> getSemesterCode(int id) async {
+    final data = await _getDataMap(id);
+    final v = data['semester_code']?.toString();
+    return (v == null || v.isEmpty) ? null : v;
   }
 
   Future<String?> getSourceSchoolPinyin(int id) async {

@@ -30,6 +30,9 @@ class ScheduleModel {
 
   void classify() {
     for (Course course in courses) {
+      // 学校数据里已经没有这门课了，正在两轮宽限期里等最终确认——数据还在，
+      // 但先别显示。下一轮要是又抓到了，它会原样回来。
+      if (course.missingRounds > 0) continue;
       List weeks = json.decode(course.weeks!);
       if (course.weekTime == 0) {
         freeCourses.add(course);

@@ -10,11 +10,14 @@ import '../../Components/Toast.dart';
 import '../../Models/CourseModel.dart';
 import '../../Models/CourseTableModel.dart';
 import '../../Resources/NjuConfig.dart';
+import '../../Utils/ColorUtil.dart';
 import '../../Utils/CourseDiff.dart';
 import '../../Utils/CourseImportCodec.dart';
+import '../../Utils/MissingCourseSweeper.dart';
 import '../../Utils/NjuAutoLoginScript.dart';
 import '../../Utils/NjuCredentialStore.dart';
 import '../../Utils/NjuEhallJsonImporter.dart';
+import '../../Utils/SemesterCode.dart';
 import '../../Utils/States/MainState.dart';
 
 /// 南大专属导入/登录流程。
@@ -89,6 +92,7 @@ class _ImportViewState extends State<ImportView> {
   bool _updatingCurrentTable = false;
   int? _updateTableId;
   CourseDiffResult? _updateDiff;
+  MissingSweepResult? _updateSweep;
 
   @override
   void initState() {
@@ -500,16 +504,19 @@ class _ImportViewState extends State<ImportView> {
       await ScopedModel.of<MainStateModel>(context).changeclassTable(tableId);
     }
 
+    final inserted = <Course>[];
     for (final courseMap in coursesMap) {
       final dbMap =
           CourseImportCodec.onlineCourseToDbMap(courseMap, tableId: tableId);
       final course = Course.fromMap(dbMap);
-      await _courseProvider.insert(course);
+      inserted.add(await _courseProvider.insert(course));
     }
+    await _recordCourseColors(tableId, inserted);
 
     await _courseTableProvider.updateCheckUpdateInfo(
       tableId,
       sourceSchoolPinyin: config.pinyin,
+      semesterCode: (courseTableMap['semesterCode'] ?? '').toString(),
       lastSnapshot: json.encode(coursesMap),
       lastCheckedAt: DateTime.now().toIso8601String(),
     );
@@ -550,6 +557,18 @@ class _ImportViewState extends State<ImportView> {
       }
       final newCoursesMap = List<Map<String, dynamic>>.from(courses);
 
+      // 一门课都没抓到 = 这次抓取失败，不是"全学期停课了"。这种情况下每门
+      // 课都会被判成消失，两轮下来会全部删光，宽限期防不住，只能整轮拦掉。
+      if (newCoursesMap.isEmpty) {
+        if (!mounted) return;
+        setState(() {
+          _stage = _Stage.error;
+          _errorText = '这次没有抓到任何课程，判定为抓取失败，已跳过本轮更新，'
+              '你的课表没有任何改动。\n请稍后重试。';
+        });
+        return;
+      }
+
       final tableId =
           await ScopedModel.of<MainStateModel>(context).getClassTable();
       final currentTable = await _courseTableProvider.getCourseTable(tableId);
@@ -561,6 +580,20 @@ class _ImportViewState extends State<ImportView> {
         });
         return;
       }
+
+      final fetchedSemester = (courseTableMap['semesterCode'] ?? '').toString();
+      final verdict = compareSemesterCode(
+        await _courseTableProvider.getSemesterCode(tableId),
+        fetchedSemester,
+      );
+      if (verdict == SemesterVerdict.changed) {
+        // 换学期了就不是"更新"而是"换一张表"：逐条比对上学期和这学期的课
+        // 没有意义（几乎全是新增 + 消失）。新建一张表切过去，旧表留作历史，
+        // 手动添加的课自然不会带过来。
+        await _saveCourseTableMap(config, courseTableMap);
+        return;
+      }
+
       final newCourses = newCoursesMap
           .map((m) => Course.fromMap(
               CourseImportCodec.onlineCourseToDbMap(m, tableId: tableId)))
@@ -573,9 +606,18 @@ class _ImportViewState extends State<ImportView> {
 
       final diff = diffCourseLists(oldCourses, newCourses);
 
+      // 消失的课不等用户确认，当场按两轮宽限期处理：第一轮从课表上隐藏但
+      // 留着数据，连续两轮没抓到才真删。结果会在下面的预览页告诉用户。
+      final sweep = await sweepMissingCourses(
+        provider: _courseProvider,
+        oldCourses: oldCourses,
+        diff: diff,
+      );
+
       await _courseTableProvider.updateCheckUpdateInfo(
         tableId,
         sourceSchoolPinyin: config.pinyin,
+        semesterCode: fetchedSemester,
         lastSnapshot: json.encode(newCoursesMap),
         lastCheckedAt: DateTime.now().toIso8601String(),
       );
@@ -584,6 +626,7 @@ class _ImportViewState extends State<ImportView> {
       setState(() {
         _updateTableId = tableId;
         _updateDiff = diff;
+        _updateSweep = sweep;
         _stage = _Stage.reviewingUpdate;
       });
     } catch (e) {
@@ -610,28 +653,31 @@ class _ImportViewState extends State<ImportView> {
       await _courseProvider.update(updated);
     }
 
+    final inserted = <Course>[];
     for (final slot in diff.addedSlots) {
       slot.tableId = tableId;
-      await _courseProvider.insert(slot);
+      inserted.add(await _courseProvider.insert(slot));
     }
     for (final group in diff.addedCourses.values) {
       for (final slot in group) {
         slot.tableId = tableId;
-        await _courseProvider.insert(slot);
+        inserted.add(await _courseProvider.insert(slot));
       }
     }
+    await _recordCourseColors(tableId, inserted);
 
     if (!mounted) return;
     Toast.showToast('已更新当前课程表', context);
     Navigator.of(context).pop(true);
   }
 
-  Future<void> _removeUpdateSlot(Course slot) async {
-    if (slot.id != null) {
-      await _courseProvider.delete(slot.id!);
-      Toast.showToast('已删除', context);
-      setState(() {});
-    }
+  /// 把新写进来的课程按色板算出的颜色固定到课表级映射里。已经记过的课程
+  /// 不会被覆盖，所以同一门课在后续更新中被删掉又加回来时颜色不变。
+  Future<void> _recordCourseColors(int tableId, List<Course> courses) async {
+    if (courses.isEmpty) return;
+    final pool = await ColorPool.getActivePool();
+    await _courseTableProvider.mergeCourseColors(
+        tableId, paletteColorEntries(courses, pool));
   }
 
   /// 统一的"重置状态回到某个起始页"，默认回到 [_initialStage]（三选一
@@ -648,6 +694,7 @@ class _ImportViewState extends State<ImportView> {
       _updatingCurrentTable = false;
       _updateTableId = null;
       _updateDiff = null;
+      _updateSweep = null;
     });
   }
 
@@ -910,11 +957,12 @@ class _ImportViewState extends State<ImportView> {
     );
   }
 
-  /// "更新当前课程表"的变更预览，跟"课表管理"里"检查更新"的展示逻辑
-  /// 一致：新增/消失/变更分类列出，消失的课程/时间段不自动删，需要
-  /// 手动逐条确认，避免误判导致数据被悄悄清掉。
+  /// "更新当前课程表"的变更预览：新增和字段变更列出来等用户点应用；
+  /// 消失的课程已经按两轮宽限期自动处理过了（[sweepMissingCourses]），
+  /// 这里只是把处理结果告诉用户，不需要他再确认一次。
   Widget _buildUpdateReview(BuildContext context) {
     final diff = _updateDiff!;
+    final sweepSummary = _updateSweep?.summary;
     if (diff.isEmpty) {
       return Center(
         child: Padding(
@@ -922,10 +970,11 @@ class _ImportViewState extends State<ImportView> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Text('没有检测到课表变化。'),
+              Text(sweepSummary ?? '没有检测到课表变化。',
+                  textAlign: TextAlign.center),
               const SizedBox(height: 16),
               ElevatedButton(
-                onPressed: () => Navigator.of(context).pop(false),
+                onPressed: () => Navigator.of(context).pop(true),
                 child: const Text('完成'),
               ),
             ],
@@ -935,6 +984,14 @@ class _ImportViewState extends State<ImportView> {
     }
 
     final items = <Widget>[];
+
+    if (sweepSummary != null) {
+      items.add(Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+        child: Text(sweepSummary,
+            style: TextStyle(color: Theme.of(context).colorScheme.primary)),
+      ));
+    }
 
     if (diff.addedCourses.isNotEmpty) {
       items.add(_updateSectionTitle('新增课程'));
@@ -950,14 +1007,12 @@ class _ImportViewState extends State<ImportView> {
     }
 
     if (diff.removedCourses.isNotEmpty) {
-      items.add(_updateSectionTitle('课程消失（不会自动删除，需手动确认）'));
+      items.add(_updateSectionTitle('学校数据里没找到（已从课表隐藏）'));
       for (final entry in diff.removedCourses.entries) {
         for (final c in entry.value) {
           items.add(ListTile(
             title: Text(c.name ?? '', style: const TextStyle(color: Colors.red)),
             subtitle: Text('${c.teacher ?? ''} · ${c.classroom ?? ''}'),
-            trailing: TextButton(
-                onPressed: () => _removeUpdateSlot(c), child: const Text('删除')),
           ));
         }
       }
@@ -998,14 +1053,12 @@ class _ImportViewState extends State<ImportView> {
     }
 
     if (diff.removedSlots.isNotEmpty) {
-      items.add(_updateSectionTitle('取消的时间段（不会自动删除，需手动确认）'));
+      items.add(_updateSectionTitle('取消的时间段（已从课表隐藏）'));
       for (final c in diff.removedSlots) {
         items.add(ListTile(
           title: Text(c.name ?? '', style: const TextStyle(color: Colors.red)),
           subtitle:
               Text('星期${c.weekTime} 第${c.startTime}节 · ${c.classroom ?? ''}'),
-          trailing: TextButton(
-              onPressed: () => _removeUpdateSlot(c), child: const Text('删除')),
         ));
       }
     }
@@ -1016,7 +1069,7 @@ class _ImportViewState extends State<ImportView> {
         padding: const EdgeInsets.all(12),
         child: ElevatedButton(
           onPressed: _applyUpdateChanges,
-          child: const Text('应用新增/变更（不含上方需手动删除的项）'),
+          child: const Text('应用新增与变更'),
         ),
       ),
     ]);
