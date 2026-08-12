@@ -516,11 +516,13 @@ class _ImportViewState extends State<ImportView> {
 
       switch (report.outcome) {
         case SyncOutcome.emptyFetch:
+          // 跟导入路径走同一个诊断页。一句"抓取失败"是过度断言——登录成功
+          // 但这学期确实没排课，跟真的抓取失败，结果都是 0 门课，得把学期
+          // 信息摊出来让用户自己判断。
           if (!mounted) return;
           setState(() {
-            _stage = _Stage.error;
-            _errorText = '这次没有抓到任何课程，判定为抓取失败，已跳过本轮更新，'
-                '你的课表没有任何改动。\n请稍后重试。';
+            _emptyResult = fetch;
+            _stage = _Stage.emptyResult;
           });
           return;
         case SyncOutcome.noSuchTable:
@@ -663,6 +665,16 @@ class _ImportViewState extends State<ImportView> {
                 : '连学期信息都没读到，可能是登录状态或接口出了问题。',
             style: TextStyle(color: Theme.of(context).hintColor, height: 1.6),
           ),
+          if (_updatingCurrentTable) ...[
+            const SizedBox(height: 12),
+            Text(
+              '本轮更新已跳过，你的课表没有任何改动。\n'
+              '（抓到 0 门课时如果照常比对，现有课程会全部被判成"消失"，'
+              '所以这种情况一律不动数据。）',
+              style: TextStyle(
+                  color: Theme.of(context).colorScheme.primary, height: 1.6),
+            ),
+          ],
           const SizedBox(height: 20),
           row('登录', '成功（已到达课表页）'),
           row('学期名称', semesterName, ok: semesterName.isNotEmpty),
@@ -691,18 +703,21 @@ class _ImportViewState extends State<ImportView> {
                 child: const Text('返回'),
               ),
             ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: ElevatedButton(
-                onPressed: () async {
-                  final config = _activeConfig;
-                  if (config == null || fetch == null) return;
-                  setState(() => _stage = _Stage.fetching);
-                  await _importAsNewTable(config, fetch);
-                },
-                child: const Text('仍然创建空课表'),
+            // 更新路径下没有"建表"这回事，本来就没动数据，只需要返回。
+            if (!_updatingCurrentTable) ...[
+              const SizedBox(width: 12),
+              Expanded(
+                child: ElevatedButton(
+                  onPressed: () async {
+                    final config = _activeConfig;
+                    if (config == null || fetch == null) return;
+                    setState(() => _stage = _Stage.fetching);
+                    await _importAsNewTable(config, fetch);
+                  },
+                  child: const Text('仍然创建空课表'),
+                ),
               ),
-            ),
+            ],
           ]),
         ],
       ),
