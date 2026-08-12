@@ -1,22 +1,17 @@
 import 'dart:async';
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import '../../Components/Toast.dart';
-import '../../Models/CourseModel.dart';
 import '../../Models/CourseTableModel.dart';
 import '../../Resources/NjuConfig.dart';
-import '../../Utils/ColorUtil.dart';
-import '../../Utils/CourseDiff.dart';
-import '../../Utils/CourseImportCodec.dart';
-import '../../Utils/MissingCourseSweeper.dart';
-import '../../Utils/NjuEhallJsonImporter.dart';
-import '../../Utils/SemesterCode.dart';
+import '../../Services/CourseSyncService.dart';
 
-/// "检查更新"页面：复用已登录 WebView，通过 [NjuEhallJsonImporter] 读取
-/// eHall JSON，
-/// 但只解析、不直接写库——抓到新数据后先和当前数据库里的课程做 diff，
-/// 展示变更预览，由用户确认后再落库。
+/// "检查更新"页面：复用已登录 WebView 抓取最新课表，跟当前数据库里的课程
+/// 做比对，展示变更预览由用户确认后再落库。
+///
+/// 抓取、判学期、比对、覆盖这套逻辑全在 [CourseSyncService] 里，本页只负责
+/// 「把用户登进去」和「把结果画出来」——导入页的「更新当前课程表」走的是
+/// 同一个服务，两边不会再各写一遍。
 class CheckUpdateView extends StatefulWidget {
   final int tableId;
 
@@ -30,16 +25,16 @@ enum _Stage { loadingConfig, unsupported, webview, reviewing, applied }
 
 class _CheckUpdateViewState extends State<CheckUpdateView> {
   final CourseTableProvider _courseTableProvider = CourseTableProvider();
-  final CourseProvider _courseProvider = CourseProvider();
+  final CourseSyncService _syncService = CourseSyncService();
 
   _Stage _stage = _Stage.loadingConfig;
   String _message = '正在准备检查…';
   Map? _config;
+  NjuEntryConfig? _entry;
   WebViewController? _webViewController;
   Timer? _sessionTimeoutTimer;
 
-  CourseDiffResult? _diff;
-  MissingSweepResult? _sweep;
+  SyncReport? _report;
 
   @override
   void initState() {
@@ -74,6 +69,7 @@ class _CheckUpdateViewState extends State<CheckUpdateView> {
     }
 
     setState(() {
+      _entry = entry;
       _config = entry.toConfigMap();
       _stage = _Stage.webview;
     });
@@ -132,84 +128,45 @@ class _CheckUpdateViewState extends State<CheckUpdateView> {
   Future<void> _fetchAndDiff() async {
     try {
       Toast.showToast('正在抓取最新课表…', context);
-      final courseTableMap = await NjuEhallJsonImporter.fetchCourseTableMap(
-        _webViewController!,
-        pinyin: _config!['pinyin'].toString(),
-      );
-
-      Iterable courses;
-      final rawCourses = courseTableMap['courses'];
-      if (rawCourses.runtimeType != String) {
-        courses = rawCourses;
-      } else if (json.decode(rawCourses).runtimeType != String) {
-        courses = json.decode(rawCourses);
-      } else {
-        courses = json.decode(json.decode(rawCourses));
-      }
-      final newCoursesMap = List<Map<String, dynamic>>.from(courses);
-
-      // 一门课都没抓到 = 抓取失败，不是"全学期停课了"。不拦掉的话每门课都
-      // 会被判成消失，两轮之后全部删光。
-      if (newCoursesMap.isEmpty) {
-        if (!mounted) return;
-        setState(() {
-          _stage = _Stage.unsupported;
-          _message = '这次没有抓到任何课程，判定为抓取失败，已跳过本轮检查，'
-              '课表没有任何改动。请稍后重试。';
-        });
-        return;
-      }
-
-      final fetchedSemester = (courseTableMap['semesterCode'] ?? '').toString();
-      final verdict = compareSemesterCode(
-        await _courseTableProvider.getSemesterCode(widget.tableId),
-        fetchedSemester,
-      );
-      if (verdict == SemesterVerdict.changed) {
-        // 换学期了就不该在这张表上做"更新"——上学期和这学期的课逐条比对
-        // 只会得到一堆新增和消失。这个页面没有建表能力，指路给导入页。
-        if (!mounted) return;
-        setState(() {
-          _stage = _Stage.unsupported;
-          _message = '教务系统已经是新的学期了，这张课表属于上一个学期。\n'
-              '请到"导入课程表"新建一张本学期的课表。';
-        });
-        return;
-      }
-
-      final newCourses = newCoursesMap
-          .map((m) => Course.fromMap(
-              CourseImportCodec.onlineCourseToDbMap(m, tableId: widget.tableId)))
-          .toList();
-
-      final oldCoursesRaw = await _courseProvider.getAllCourses(widget.tableId);
-      final oldCourses =
-          oldCoursesRaw.map((m) => Course.fromMap(Map<String, dynamic>.from(m))).toList();
-
-      final diff = diffCourseLists(oldCourses, newCourses);
-
-      // 消失的课当场按两轮宽限期处理，不等用户确认；结果在预览页里告知。
-      final sweep = await sweepMissingCourses(
-        provider: _courseProvider,
-        oldCourses: oldCourses,
-        diff: diff,
-      );
-
-      // 无论用户是否应用变更，都记录一次检查时间和最新抓取结果，供以后参考。
-      await _courseTableProvider.updateCheckUpdateInfo(
-        widget.tableId,
-        semesterCode: fetchedSemester,
-        lastSnapshot: json.encode(newCoursesMap),
-        lastCheckedAt: DateTime.now().toIso8601String(),
+      final fetch = await _syncService.fetch(_webViewController!, _entry!);
+      final report = await _syncService.compareWithTable(
+        config: _entry!,
+        fetch: fetch,
+        tableId: widget.tableId,
       );
 
       if (!mounted) return;
-      setState(() {
-        _diff = diff;
-        _sweep = sweep;
-        _stage = _Stage.reviewing;
-      });
+      switch (report.outcome) {
+        case SyncOutcome.emptyFetch:
+          setState(() {
+            _stage = _Stage.unsupported;
+            _message = '这次没有抓到任何课程，判定为抓取失败，已跳过本轮检查，'
+                '课表没有任何改动。请稍后重试。';
+          });
+          return;
+        case SyncOutcome.semesterChanged:
+          // 这个页面没有建表能力，指路给导入页。
+          setState(() {
+            _stage = _Stage.unsupported;
+            _message = '教务系统已经是新的学期了，这张课表属于上一个学期。\n'
+                '请到"导入课程表"新建一张本学期的课表。';
+          });
+          return;
+        case SyncOutcome.noSuchTable:
+          setState(() {
+            _stage = _Stage.unsupported;
+            _message = '这张课表已经不存在了。';
+          });
+          return;
+        case SyncOutcome.ok:
+          setState(() {
+            _report = report;
+            _stage = _Stage.reviewing;
+          });
+          return;
+      }
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _stage = _Stage.unsupported;
         _message = '检查更新失败：$e';
@@ -218,37 +175,7 @@ class _CheckUpdateViewState extends State<CheckUpdateView> {
   }
 
   Future<void> _applyChanges() async {
-    final diff = _diff!;
-
-    for (final change in diff.changedSlots) {
-      final updated = change.oldSlot;
-      updated.classroom = change.newSlot.classroom;
-      updated.info = change.newSlot.info;
-      updated.weekTime = change.newSlot.weekTime;
-      updated.startTime = change.newSlot.startTime;
-      updated.timeCount = change.newSlot.timeCount;
-      updated.weeks = change.newSlot.weeks;
-      await _courseProvider.update(updated);
-    }
-
-    final inserted = <Course>[];
-    for (final slot in diff.addedSlots) {
-      slot.tableId = widget.tableId;
-      inserted.add(await _courseProvider.insert(slot));
-    }
-    for (final group in diff.addedCourses.values) {
-      for (final slot in group) {
-        slot.tableId = widget.tableId;
-        inserted.add(await _courseProvider.insert(slot));
-      }
-    }
-    // 把新课程的颜色固定进课表级映射，之后被删掉又加回来时颜色不变。
-    if (inserted.isNotEmpty) {
-      final pool = await ColorPool.getActivePool();
-      await _courseTableProvider.mergeCourseColors(
-          widget.tableId, paletteColorEntries(inserted, pool));
-    }
-
+    await _syncService.applyChanges(_report!);
     if (mounted) {
       Toast.showToast('已应用课表变更', context);
       setState(() => _stage = _Stage.applied);
@@ -287,8 +214,8 @@ class _CheckUpdateViewState extends State<CheckUpdateView> {
   }
 
   Widget _buildReview(BuildContext context) {
-    final diff = _diff!;
-    final sweepSummary = _sweep?.summary;
+    final diff = _report!.diff!;
+    final sweepSummary = _report?.sweep?.summary;
     if (diff.isEmpty) {
       return Center(
           child: Padding(
