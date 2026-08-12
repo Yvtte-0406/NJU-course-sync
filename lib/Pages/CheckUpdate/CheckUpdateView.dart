@@ -29,7 +29,6 @@ class _CheckUpdateViewState extends State<CheckUpdateView> {
 
   _Stage _stage = _Stage.loadingConfig;
   String _message = '正在准备检查…';
-  Map? _config;
   NjuEntryConfig? _entry;
   WebViewController? _webViewController;
   Timer? _sessionTimeoutTimer;
@@ -70,24 +69,23 @@ class _CheckUpdateViewState extends State<CheckUpdateView> {
 
     setState(() {
       _entry = entry;
-      _config = entry.toConfigMap();
       _stage = _Stage.webview;
     });
     _initWebView();
   }
 
   void _initWebView() {
-    final config = _config!;
+    final config = _entry!;
     _webViewController = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setBackgroundColor(const Color(0x00000000))
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageFinished: (String url) {
-            if (config['redirectUrl'] != '' &&
-                url.startsWith(config['redirectUrl'])) {
-              _webViewController!.loadRequest(Uri.parse(config['targetUrl']));
-            } else if (url.startsWith(config['targetUrl'])) {
+            if (config.redirectUrl != '' &&
+                url.startsWith(config.redirectUrl)) {
+              _webViewController!.loadRequest(Uri.parse(config.targetUrl));
+            } else if (url.startsWith(config.targetUrl)) {
               _sessionTimeoutTimer?.cancel();
               _fetchAndDiff();
             } else if (url.contains('authserver.nju.edu.cn/authserver/login')) {
@@ -114,7 +112,7 @@ class _CheckUpdateViewState extends State<CheckUpdateView> {
           },
         ),
       )
-      ..loadRequest(Uri.parse(config['initialUrl']));
+      ..loadRequest(Uri.parse(config.initialUrl));
 
     _sessionTimeoutTimer = Timer(const Duration(seconds: 20), () {
       if (!mounted || _stage != _Stage.webview) return;
