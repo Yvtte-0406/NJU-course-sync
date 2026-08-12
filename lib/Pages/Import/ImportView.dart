@@ -55,19 +55,11 @@ enum _Stage {
   loginForm,
   loggingIn,
   needManualLogin,
-  debugPreFetch,
   fetching,
+  emptyResult,
   reviewingUpdate,
   error,
 }
-
-// TODO(临时测试代码，成品发布前必须删除): 登录成功、抵达目标页之后，
-// 先把真实网页显示出来，让你手动切换学期（比如切到有课的下学期）再点
-// 按钮触发抓取，用来验证抓取/解析逻辑本身有没有问题，而不是自动直接抓
-// 当前学期（可能没课）。现阶段保留，用完之后把这个改回 false（或者
-// 直接删掉这段 + `_Stage.debugPreFetch` 相关代码 + `_buildBody` 里对应
-// 的 case 分支），恢复"登录成功自动抓取"的正式体验。
-const bool _kDebugManualSemesterPick = true; // TODO: 临时测试用，成品前删除
 
 class _ImportViewState extends State<ImportView> {
   final _usernameController = TextEditingController();
@@ -93,6 +85,9 @@ class _ImportViewState extends State<ImportView> {
   int? _updateTableId;
   CourseDiffResult? _updateDiff;
   MissingSweepResult? _updateSweep;
+
+  /// 抓到 0 门课时把原始结果留下来，展示给用户判断到底是哪一步的问题。
+  Map<String, dynamic>? _emptyResultMap;
 
   @override
   void initState() {
@@ -237,8 +232,8 @@ class _ImportViewState extends State<ImportView> {
 
     if (url.startsWith(config.targetUrl)) {
       _loginTimeoutTimer?.cancel();
-      if (_stage == _Stage.fetching || _stage == _Stage.debugPreFetch) {
-        // 已经在抓取/调试预览阶段，避免重复触发。
+      if (_stage == _Stage.fetching || _stage == _Stage.emptyResult) {
+        // 已经在抓取或结果展示阶段，避免重复触发。
         return;
       }
       unawaited(_markLoginSucceeded());
@@ -249,10 +244,6 @@ class _ImportViewState extends State<ImportView> {
         _usernameController.text.trim(),
         _passwordController.text,
       ));
-      if (_kDebugManualSemesterPick) {
-        setState(() => _stage = _Stage.debugPreFetch);
-        return;
-      }
       if (_updatingCurrentTable) {
         await _fetchAndUpdateCurrent(config);
       } else {
@@ -472,6 +463,19 @@ class _ImportViewState extends State<ImportView> {
         _webViewController!,
         pinyin: config.pinyin,
       );
+
+      // 抓到 0 门课时，光看结果分不清"登录/抓取失败"和"这学期确实没排课"
+      // ——两种情况都是一张空课表。所以这里不直接建表，先把抓到的东西摊开
+      // 给用户看：能报出学期名称和代码，就说明登录和抓取都成功了。
+      if (_courseCountOf(courseTableMap) == 0) {
+        if (!mounted) return;
+        setState(() {
+          _emptyResultMap = courseTableMap;
+          _stage = _Stage.emptyResult;
+        });
+        return;
+      }
+
       await _saveCourseTableMap(config, courseTableMap);
     } catch (e) {
       if (!mounted) return;
@@ -482,9 +486,19 @@ class _ImportViewState extends State<ImportView> {
     }
   }
 
-  /// 把抓到的课表数据落库。
-  Future<void> _saveCourseTableMap(
-      NjuEntryConfig config, Map<String, dynamic> courseTableMap) async {
+  /// 抓取结果里有多少门课。解析不出来返回 -1（区别于"确实是 0 门"）。
+  int _courseCountOf(Map<String, dynamic> courseTableMap) {
+    try {
+      return _decodeCourses(courseTableMap).length;
+    } catch (_) {
+      return -1;
+    }
+  }
+
+  /// `courses` 这个字段在不同来源下可能是列表、JSON 字符串、甚至被编码了
+  /// 两次的字符串，统一在这里剥开。
+  List<Map<String, dynamic>> _decodeCourses(
+      Map<String, dynamic> courseTableMap) {
     Iterable courses;
     final rawCourses = courseTableMap['courses'];
     if (rawCourses.runtimeType != String) {
@@ -494,7 +508,13 @@ class _ImportViewState extends State<ImportView> {
     } else {
       courses = json.decode(json.decode(rawCourses));
     }
-    final coursesMap = List<Map<String, dynamic>>.from(courses);
+    return List<Map<String, dynamic>>.from(courses);
+  }
+
+  /// 把抓到的课表数据落库。
+  Future<void> _saveCourseTableMap(
+      NjuEntryConfig config, Map<String, dynamic> courseTableMap) async {
+    final coursesMap = _decodeCourses(courseTableMap);
 
     final courseTable =
         await _courseTableProvider.insert(CourseTable(courseTableMap['name']));
@@ -695,6 +715,7 @@ class _ImportViewState extends State<ImportView> {
       _updateTableId = null;
       _updateDiff = null;
       _updateSweep = null;
+      _emptyResultMap = null;
     });
   }
 
@@ -732,32 +753,113 @@ class _ImportViewState extends State<ImportView> {
           ),
           Expanded(child: WebViewWidget(controller: _webViewController!)),
         ]);
-      case _Stage.debugPreFetch: // TODO: 临时测试用，成品前删除（连同上面的 _kDebugManualSemesterPick）
-        return Column(children: [
-          Padding(
-            padding: const EdgeInsets.all(12),
-            child: Column(children: [
-              const Text(
-                '（临时调试）登录成功，已到达课表页。\n'
-                '可以在下面手动切换学期（比如切到有课的下学期），\n'
-                '切好之后点按钮用当前页面内容抓取一次。',
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 8),
-              ElevatedButton(
-                onPressed: () => _updatingCurrentTable
-                    ? _fetchAndUpdateCurrent(_activeConfig!)
-                    : _fetchAndImport(_activeConfig!),
-                child: const Text('用当前页面内容抓取课表'),
-              ),
-            ]),
-          ),
-          Expanded(child: WebViewWidget(controller: _webViewController!)),
-        ]);
+      case _Stage.emptyResult:
+        return _buildEmptyResult(context);
       case _Stage.reviewingUpdate:
         return _buildUpdateReview(context);
       case _Stage.error:
         return _buildError(context);
+    }
+  }
+
+  /// 抓到 0 门课时的说明页。
+  ///
+  /// 存在的意义是把"登录/抓取失败"和"这学期确实没排课"区分开——两者的
+  /// 结果都是一张空课表，光看课表分不出来。能显示出学期名称和学期代码，
+  /// 就说明登录成功、接口通了、数据也解析出来了，只是内容为空。
+  Widget _buildEmptyResult(BuildContext context) {
+    final map = _emptyResultMap ?? const <String, dynamic>{};
+    final semesterName = (map['name'] ?? '').toString();
+    final semesterCode = (map['semesterCode'] ?? '').toString();
+    final gotSemester = semesterName.isNotEmpty || semesterCode.isNotEmpty;
+
+    Widget row(String label, String value, {bool ok = true}) => Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(ok ? Icons.check_circle : Icons.help_outline,
+                  size: 18,
+                  color: ok ? Colors.green : Theme.of(context).hintColor),
+              const SizedBox(width: 8),
+              SizedBox(width: 76, child: Text(label)),
+              Expanded(
+                  child: SelectableText(value.isEmpty ? '（空）' : value,
+                      style: const TextStyle(fontWeight: FontWeight.w600))),
+            ],
+          ),
+        );
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('抓取完成，但这个学期没有课程',
+              style: Theme.of(context).textTheme.titleLarge),
+          const SizedBox(height: 8),
+          Text(
+            gotSemester
+                ? '登录和抓取都成功了——下面这些信息就是从教务系统读回来的。\n'
+                    '课程数为 0，说明这个学期教务系统里确实还没有排课数据。'
+                : '连学期信息都没读到，可能是登录状态或接口出了问题。',
+            style: TextStyle(color: Theme.of(context).hintColor, height: 1.6),
+          ),
+          const SizedBox(height: 20),
+          row('登录', '成功（已到达课表页）'),
+          row('学期名称', semesterName, ok: semesterName.isNotEmpty),
+          row('学期代码', semesterCode, ok: semesterCode.isNotEmpty),
+          row('课程数', '0', ok: false),
+          const SizedBox(height: 20),
+          Text('原始返回数据', style: Theme.of(context).textTheme.titleSmall),
+          const SizedBox(height: 6),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: SelectableText(
+              _previewJson(map),
+              style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+            ),
+          ),
+          const SizedBox(height: 20),
+          Row(children: [
+            Expanded(
+              child: OutlinedButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('返回'),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: ElevatedButton(
+                onPressed: () async {
+                  final config = _activeConfig;
+                  final map = _emptyResultMap;
+                  if (config == null || map == null) return;
+                  setState(() => _stage = _Stage.fetching);
+                  await _saveCourseTableMap(config, map);
+                },
+                child: const Text('仍然创建空课表'),
+              ),
+            ),
+          ]),
+        ],
+      ),
+    );
+  }
+
+  /// 原始返回数据的预览。太长会把页面撑爆，截断即可——这里只是给人眼
+  /// 确认"确实拿到东西了"，不是完整日志。
+  String _previewJson(Map<String, dynamic> map) {
+    try {
+      final text = const JsonEncoder.withIndent('  ').convert(map);
+      return text.length > 1500 ? '${text.substring(0, 1500)}\n…（已截断）' : text;
+    } catch (e) {
+      return '无法序列化：$e\n\n$map';
     }
   }
 
