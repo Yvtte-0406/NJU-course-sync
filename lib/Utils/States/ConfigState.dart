@@ -1,6 +1,8 @@
 import 'package:scoped_model/scoped_model.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../UpdateCheckPolicy.dart';
+
 mixin ConfigStateModel on Model {
   bool _showWeekend = true;
   bool _showClassTime = true;
@@ -24,6 +26,23 @@ mixin ConfigStateModel on Model {
   bool _liveActivityEnabled = true; // 是否启用 Live Activity（使用与小组件相同的"即将上课提醒时间"）
   String _liveActivityTextLeft = "好好学习"; // 左侧励志文本
   String _liveActivityTextRight = "天天向上"; // 右侧励志文本
+
+  /// 隔多久提醒一次检查课表更新。课表一学期只变几次，一天一次足够。
+  UpdateCheckInterval _updateCheckInterval = UpdateCheckInterval.daily;
+
+  void setUpdateCheckInterval(UpdateCheckInterval interval) async {
+    _updateCheckInterval = interval;
+    notifyListeners();
+    SharedPreferences sp = await SharedPreferences.getInstance();
+    sp.setString('updateCheckInterval', interval.storageKey);
+  }
+
+  Future<UpdateCheckInterval> getUpdateCheckInterval() async {
+    SharedPreferences sp = await SharedPreferences.getInstance();
+    _updateCheckInterval =
+        UpdateCheckIntervalX.fromStorageKey(sp.getString('updateCheckInterval'));
+    return _updateCheckInterval;
+  }
 
   void setShowWeekend(bool showWeekend) async {
     _showWeekend = showWeekend;

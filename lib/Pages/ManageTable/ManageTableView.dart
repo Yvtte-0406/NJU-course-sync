@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:scoped_model/scoped_model.dart';
 import '../../Models/CourseTableModel.dart';
 import '../../Utils/States/MainState.dart';
+import '../../Utils/UpdateCheckPolicy.dart';
 import '../../Components/Toast.dart';
 import '../CheckUpdate/CheckUpdateView.dart';
 import '../Settings/Widgets/WeekChanger.dart';
@@ -51,6 +52,8 @@ class _ManageTableViewState extends State<ManageTableView> {
               children: [
                 const WeekChanger(),
                 const Divider(height: 1),
+                _buildIntervalTile(context),
+                const Divider(height: 1),
                 FutureBuilder<List<Widget>>(
                     future: _getData(context),
                     builder: (BuildContext context,
@@ -66,6 +69,39 @@ class _ManageTableViewState extends State<ManageTableView> {
                     }),
               ],
             ))));
+  }
+
+  /// 多久提醒一次检查课表更新。这里只控制"提醒"，不会自己去登录抓取——
+  /// 到点了在课表页顶部出现一条提示，点了才走完整的更新流程。
+  Widget _buildIntervalTile(BuildContext context) {
+    return FutureBuilder<UpdateCheckInterval>(
+      future: ScopedModel.of<MainStateModel>(context).getUpdateCheckInterval(),
+      builder: (context, snapshot) {
+        final current = snapshot.data;
+        return ListTile(
+          title: const Text('提醒检查课表更新'),
+          subtitle: const Text('到期后在课表页顶部提示，点了才检查'),
+          trailing: current == null
+              ? const SizedBox(width: 0)
+              : DropdownButton<UpdateCheckInterval>(
+                  value: current,
+                  items: [
+                    for (final interval in UpdateCheckInterval.values)
+                      DropdownMenuItem(
+                        value: interval,
+                        child: Text(interval.displayName),
+                      ),
+                  ],
+                  onChanged: (value) {
+                    if (value == null) return;
+                    ScopedModel.of<MainStateModel>(context)
+                        .setUpdateCheckInterval(value);
+                    setState(() {});
+                  },
+                ),
+        );
+      },
+    );
   }
 
   Future<String> _addTableDialog(BuildContext context) async {
