@@ -7,17 +7,11 @@ import 'package:scoped_model/scoped_model.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import '../../Components/Toast.dart';
-import '../../Models/CourseModel.dart';
-import '../../Models/CourseTableModel.dart';
 import '../../Resources/NjuConfig.dart';
-import '../../Utils/ColorUtil.dart';
-import '../../Utils/CourseDiff.dart';
-import '../../Utils/CourseImportCodec.dart';
-import '../../Utils/MissingCourseSweeper.dart';
+import '../../Services/CourseSyncService.dart';
 import '../../Utils/NjuAutoLoginScript.dart';
 import '../../Utils/NjuCredentialStore.dart';
 import '../../Utils/NjuEhallJsonImporter.dart';
-import '../../Utils/SemesterCode.dart';
 import '../../Utils/States/MainState.dart';
 
 /// 南大专属导入/登录流程。
@@ -64,8 +58,7 @@ enum _Stage {
 class _ImportViewState extends State<ImportView> {
   final _usernameController = TextEditingController();
   final _passwordController = TextEditingController();
-  final _courseTableProvider = CourseTableProvider();
-  final _courseProvider = CourseProvider();
+  final _syncService = CourseSyncService();
 
   _Stage _stage = _Stage.checkingPriorLogin;
   // 重试时要回到的"起始页"：之前登录过、账号密码也还在，就是三选一的
@@ -82,12 +75,10 @@ class _ImportViewState extends State<ImportView> {
   // 本次登录成功后要做什么：新建一张表，还是更新当前显示的那张表。
   // 由入口页按钮点了哪个决定，登录本身没有任何区别。
   bool _updatingCurrentTable = false;
-  int? _updateTableId;
-  CourseDiffResult? _updateDiff;
-  MissingSweepResult? _updateSweep;
+  SyncReport? _updateReport;
 
-  /// 抓到 0 门课时把原始结果留下来，展示给用户判断到底是哪一步的问题。
-  Map<String, dynamic>? _emptyResultMap;
+  /// 抓到 0 门课时把结果留下来，展示给用户判断到底是哪一步的问题。
+  FetchResult? _emptyResult;
 
   @override
   void initState() {
@@ -459,24 +450,21 @@ class _ImportViewState extends State<ImportView> {
     });
 
     try {
-      final courseTableMap = await NjuEhallJsonImporter.fetchCourseTableMap(
-        _webViewController!,
-        pinyin: config.pinyin,
-      );
+      final fetch = await _syncService.fetch(_webViewController!, config);
 
       // 抓到 0 门课时，光看结果分不清"登录/抓取失败"和"这学期确实没排课"
       // ——两种情况都是一张空课表。所以这里不直接建表，先把抓到的东西摊开
       // 给用户看：能报出学期名称和代码，就说明登录和抓取都成功了。
-      if (_courseCountOf(courseTableMap) == 0) {
+      if (fetch.courseCount == 0) {
         if (!mounted) return;
         setState(() {
-          _emptyResultMap = courseTableMap;
+          _emptyResult = fetch;
           _stage = _Stage.emptyResult;
         });
         return;
       }
 
-      await _saveCourseTableMap(config, courseTableMap);
+      await _importAsNewTable(config, fetch);
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -486,61 +474,17 @@ class _ImportViewState extends State<ImportView> {
     }
   }
 
-  /// 抓取结果里有多少门课。解析不出来返回 -1（区别于"确实是 0 门"）。
-  int _courseCountOf(Map<String, dynamic> courseTableMap) {
-    try {
-      return _decodeCourses(courseTableMap).length;
-    } catch (_) {
-      return -1;
-    }
-  }
-
-  /// `courses` 这个字段在不同来源下可能是列表、JSON 字符串、甚至被编码了
-  /// 两次的字符串，统一在这里剥开。
-  List<Map<String, dynamic>> _decodeCourses(
-      Map<String, dynamic> courseTableMap) {
-    Iterable courses;
-    final rawCourses = courseTableMap['courses'];
-    if (rawCourses.runtimeType != String) {
-      courses = rawCourses;
-    } else if (json.decode(rawCourses).runtimeType != String) {
-      courses = json.decode(rawCourses);
-    } else {
-      courses = json.decode(json.decode(rawCourses));
-    }
-    return List<Map<String, dynamic>>.from(courses);
-  }
-
-  /// 把抓到的课表数据落库。
-  Future<void> _saveCourseTableMap(
-      NjuEntryConfig config, Map<String, dynamic> courseTableMap) async {
-    final coursesMap = _decodeCourses(courseTableMap);
-
-    final courseTable =
-        await _courseTableProvider.insert(CourseTable(courseTableMap['name']));
-    final tableId = courseTable.id!;
+  /// 新建一张课表落库，然后把它设为当前课表并收尾。
+  ///
+  /// 建表和写课程都在 [CourseSyncService] 里；留在这里的是必须要
+  /// BuildContext 的那几件事：切换当前课表、申请电池优化白名单、提示、返回。
+  Future<void> _importAsNewTable(
+      NjuEntryConfig config, FetchResult fetch) async {
+    final tableId = await _syncService.importAsNewTable(config, fetch);
 
     if (mounted) {
       await ScopedModel.of<MainStateModel>(context).changeclassTable(tableId);
     }
-
-    final inserted = <Course>[];
-    for (final courseMap in coursesMap) {
-      final dbMap =
-          CourseImportCodec.onlineCourseToDbMap(courseMap, tableId: tableId);
-      final course = Course.fromMap(dbMap);
-      inserted.add(await _courseProvider.insert(course));
-    }
-    await _recordCourseColors(tableId, inserted);
-
-    await _courseTableProvider.updateCheckUpdateInfo(
-      tableId,
-      sourceSchoolPinyin: config.pinyin,
-      semesterCode: (courseTableMap['semesterCode'] ?? '').toString(),
-      lastSnapshot: json.encode(coursesMap),
-      lastCheckedAt: DateTime.now().toIso8601String(),
-    );
-
     await _maybeRequestBatteryOptimizationExemption();
 
     if (!mounted) return;
@@ -548,11 +492,11 @@ class _ImportViewState extends State<ImportView> {
     Navigator.of(context).pop(true);
   }
 
-  /// "更新当前课程表"：抓到最新数据后不新建表，跟 [MainStateModel] 当前
-  /// 显示的那张表做 diff，进 [_Stage.reviewingUpdate] 让用户看变更预览再
-  /// 决定要不要应用——跟"课表管理"里的"检查更新"是同一套比对逻辑
-  /// （[diffCourseLists]），只是这里带了完整的自动登录链路，不依赖
-  /// 已有登录会话还没过期。
+  /// "更新当前课程表"：抓到最新数据后不新建表，跟当前显示的那张表做比对，
+  /// 进 [_Stage.reviewingUpdate] 让用户看变更预览再决定要不要应用。
+  ///
+  /// 比对逻辑跟"课表管理"里的"检查更新"是同一份（[CourseSyncService]），
+  /// 区别只在于这里带了完整的自动登录链路，不依赖已有会话还没过期。
   Future<void> _fetchAndUpdateCurrent(NjuEntryConfig config) async {
     setState(() {
       _activeConfig = config;
@@ -561,94 +505,45 @@ class _ImportViewState extends State<ImportView> {
     });
 
     try {
-      final courseTableMap = await NjuEhallJsonImporter.fetchCourseTableMap(
-        _webViewController!,
-        pinyin: config.pinyin,
-      );
-
-      Iterable courses;
-      final rawCourses = courseTableMap['courses'];
-      if (rawCourses.runtimeType != String) {
-        courses = rawCourses;
-      } else if (json.decode(rawCourses).runtimeType != String) {
-        courses = json.decode(rawCourses);
-      } else {
-        courses = json.decode(json.decode(rawCourses));
-      }
-      final newCoursesMap = List<Map<String, dynamic>>.from(courses);
-
-      // 一门课都没抓到 = 这次抓取失败，不是"全学期停课了"。这种情况下每门
-      // 课都会被判成消失，两轮下来会全部删光，宽限期防不住，只能整轮拦掉。
-      if (newCoursesMap.isEmpty) {
-        if (!mounted) return;
-        setState(() {
-          _stage = _Stage.error;
-          _errorText = '这次没有抓到任何课程，判定为抓取失败，已跳过本轮更新，'
-              '你的课表没有任何改动。\n请稍后重试。';
-        });
-        return;
-      }
-
+      final fetch = await _syncService.fetch(_webViewController!, config);
       final tableId =
           await ScopedModel.of<MainStateModel>(context).getClassTable();
-      final currentTable = await _courseTableProvider.getCourseTable(tableId);
-      if (currentTable == null) {
-        if (!mounted) return;
-        setState(() {
-          _stage = _Stage.error;
-          _errorText = '当前没有正在显示的课表，请先用"导入课程表"建一张。';
-        });
-        return;
+      final report = await _syncService.compareWithTable(
+        config: config,
+        fetch: fetch,
+        tableId: tableId,
+      );
+
+      switch (report.outcome) {
+        case SyncOutcome.emptyFetch:
+          if (!mounted) return;
+          setState(() {
+            _stage = _Stage.error;
+            _errorText = '这次没有抓到任何课程，判定为抓取失败，已跳过本轮更新，'
+                '你的课表没有任何改动。\n请稍后重试。';
+          });
+          return;
+        case SyncOutcome.noSuchTable:
+          if (!mounted) return;
+          setState(() {
+            _stage = _Stage.error;
+            _errorText = '当前没有正在显示的课表，请先用"导入课程表"建一张。';
+          });
+          return;
+        case SyncOutcome.semesterChanged:
+          // 换学期了就不是"更新"而是"换一张表"：逐条比对上学期和这学期的课
+          // 没有意义（几乎全是新增 + 消失）。新建一张表切过去，旧表留作
+          // 历史，手动添加的课自然不会带过来。
+          await _importAsNewTable(config, fetch);
+          return;
+        case SyncOutcome.ok:
+          if (!mounted) return;
+          setState(() {
+            _updateReport = report;
+            _stage = _Stage.reviewingUpdate;
+          });
+          return;
       }
-
-      final fetchedSemester = (courseTableMap['semesterCode'] ?? '').toString();
-      final verdict = compareSemesterCode(
-        await _courseTableProvider.getSemesterCode(tableId),
-        fetchedSemester,
-      );
-      if (verdict == SemesterVerdict.changed) {
-        // 换学期了就不是"更新"而是"换一张表"：逐条比对上学期和这学期的课
-        // 没有意义（几乎全是新增 + 消失）。新建一张表切过去，旧表留作历史，
-        // 手动添加的课自然不会带过来。
-        await _saveCourseTableMap(config, courseTableMap);
-        return;
-      }
-
-      final newCourses = newCoursesMap
-          .map((m) => Course.fromMap(
-              CourseImportCodec.onlineCourseToDbMap(m, tableId: tableId)))
-          .toList();
-
-      final oldCoursesRaw = await _courseProvider.getAllCourses(tableId);
-      final oldCourses = oldCoursesRaw
-          .map((m) => Course.fromMap(Map<String, dynamic>.from(m)))
-          .toList();
-
-      final diff = diffCourseLists(oldCourses, newCourses);
-
-      // 消失的课不等用户确认，当场按两轮宽限期处理：第一轮从课表上隐藏但
-      // 留着数据，连续两轮没抓到才真删。结果会在下面的预览页告诉用户。
-      final sweep = await sweepMissingCourses(
-        provider: _courseProvider,
-        oldCourses: oldCourses,
-        diff: diff,
-      );
-
-      await _courseTableProvider.updateCheckUpdateInfo(
-        tableId,
-        sourceSchoolPinyin: config.pinyin,
-        semesterCode: fetchedSemester,
-        lastSnapshot: json.encode(newCoursesMap),
-        lastCheckedAt: DateTime.now().toIso8601String(),
-      );
-
-      if (!mounted) return;
-      setState(() {
-        _updateTableId = tableId;
-        _updateDiff = diff;
-        _updateSweep = sweep;
-        _stage = _Stage.reviewingUpdate;
-      });
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -659,45 +554,10 @@ class _ImportViewState extends State<ImportView> {
   }
 
   Future<void> _applyUpdateChanges() async {
-    final diff = _updateDiff!;
-    final tableId = _updateTableId!;
-
-    for (final change in diff.changedSlots) {
-      final updated = change.oldSlot;
-      updated.classroom = change.newSlot.classroom;
-      updated.info = change.newSlot.info;
-      updated.weekTime = change.newSlot.weekTime;
-      updated.startTime = change.newSlot.startTime;
-      updated.timeCount = change.newSlot.timeCount;
-      updated.weeks = change.newSlot.weeks;
-      await _courseProvider.update(updated);
-    }
-
-    final inserted = <Course>[];
-    for (final slot in diff.addedSlots) {
-      slot.tableId = tableId;
-      inserted.add(await _courseProvider.insert(slot));
-    }
-    for (final group in diff.addedCourses.values) {
-      for (final slot in group) {
-        slot.tableId = tableId;
-        inserted.add(await _courseProvider.insert(slot));
-      }
-    }
-    await _recordCourseColors(tableId, inserted);
-
+    await _syncService.applyChanges(_updateReport!);
     if (!mounted) return;
     Toast.showToast('已更新当前课程表', context);
     Navigator.of(context).pop(true);
-  }
-
-  /// 把新写进来的课程按色板算出的颜色固定到课表级映射里。已经记过的课程
-  /// 不会被覆盖，所以同一门课在后续更新中被删掉又加回来时颜色不变。
-  Future<void> _recordCourseColors(int tableId, List<Course> courses) async {
-    if (courses.isEmpty) return;
-    final pool = await ColorPool.getActivePool();
-    await _courseTableProvider.mergeCourseColors(
-        tableId, paletteColorEntries(courses, pool));
   }
 
   /// 统一的"重置状态回到某个起始页"，默认回到 [_initialStage]（三选一
@@ -712,10 +572,8 @@ class _ImportViewState extends State<ImportView> {
       _activeConfig = null;
       _autofillAttempted = false;
       _updatingCurrentTable = false;
-      _updateTableId = null;
-      _updateDiff = null;
-      _updateSweep = null;
-      _emptyResultMap = null;
+      _updateReport = null;
+      _emptyResult = null;
     });
   }
 
@@ -768,10 +626,10 @@ class _ImportViewState extends State<ImportView> {
   /// 结果都是一张空课表，光看课表分不出来。能显示出学期名称和学期代码，
   /// 就说明登录成功、接口通了、数据也解析出来了，只是内容为空。
   Widget _buildEmptyResult(BuildContext context) {
-    final map = _emptyResultMap ?? const <String, dynamic>{};
-    final semesterName = (map['name'] ?? '').toString();
-    final semesterCode = (map['semesterCode'] ?? '').toString();
-    final gotSemester = semesterName.isNotEmpty || semesterCode.isNotEmpty;
+    final fetch = _emptyResult;
+    final semesterName = fetch?.semesterName ?? '';
+    final semesterCode = fetch?.semesterCode ?? '';
+    final gotSemester = fetch?.hasSemesterInfo ?? false;
 
     Widget row(String label, String value, {bool ok = true}) => Padding(
           padding: const EdgeInsets.symmetric(vertical: 4),
@@ -821,7 +679,7 @@ class _ImportViewState extends State<ImportView> {
               borderRadius: BorderRadius.circular(8),
             ),
             child: SelectableText(
-              _previewJson(map),
+              _previewJson(fetch?.raw ?? const <String, dynamic>{}),
               style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
             ),
           ),
@@ -838,10 +696,9 @@ class _ImportViewState extends State<ImportView> {
               child: ElevatedButton(
                 onPressed: () async {
                   final config = _activeConfig;
-                  final map = _emptyResultMap;
-                  if (config == null || map == null) return;
+                  if (config == null || fetch == null) return;
                   setState(() => _stage = _Stage.fetching);
-                  await _saveCourseTableMap(config, map);
+                  await _importAsNewTable(config, fetch);
                 },
                 child: const Text('仍然创建空课表'),
               ),
@@ -1063,8 +920,8 @@ class _ImportViewState extends State<ImportView> {
   /// 消失的课程已经按两轮宽限期自动处理过了（[sweepMissingCourses]），
   /// 这里只是把处理结果告诉用户，不需要他再确认一次。
   Widget _buildUpdateReview(BuildContext context) {
-    final diff = _updateDiff!;
-    final sweepSummary = _updateSweep?.summary;
+    final diff = _updateReport!.diff!;
+    final sweepSummary = _updateReport?.sweep?.summary;
     if (diff.isEmpty) {
       return Center(
         child: Padding(
