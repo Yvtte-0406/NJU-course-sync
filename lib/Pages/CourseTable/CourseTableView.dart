@@ -13,6 +13,7 @@ import './CourseTablePresenter.dart';
 import '../AddCourse/AddCourseView.dart';
 import '../Settings/SettingsView.dart';
 import '../Import/ImportView.dart';
+import '../../Utils/UpdateCheckPolicy.dart';
 import '../../Components/Separator.dart';
 import '../../Resources/Config.dart';
 import '../../Utils/States/MainState.dart';
@@ -62,6 +63,11 @@ class CourseTableViewState extends State<CourseTableView> {
   late double _snackbarHeight;
   late String _bgImgPath;
   int _freeCourseNum = 0;
+
+  /// 当前课表是否到了该提醒检查更新的时候，以及"上次检查于…"的文案。
+  bool _updateReminderDue = false;
+  String _lastCheckedDescription = '';
+  bool _updateReminderDismissed = false;
 
   List<Course> multiClassesDialog = [];
 
@@ -115,6 +121,8 @@ class CourseTableViewState extends State<CourseTableView> {
       _maxShowClasses = Config.MAX_CLASSES;
     }
 
+    await _refreshUpdateReminder(context);
+
     _screenWidth = MediaQuery.of(context).size.width;
     _screenHeight = MediaQuery.of(context).size.height;
     _weekTitleHeight = 30;
@@ -137,6 +145,78 @@ class CourseTableViewState extends State<CourseTableView> {
     }
 
     return true;
+  }
+
+  /// 到期提示条。没到期、或者用户这次已经划掉了，就完全不占位置。
+  Widget _buildUpdateReminder(BuildContext context) {
+    if (!_updateReminderDue || _updateReminderDismissed) {
+      return const SizedBox.shrink();
+    }
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.primaryContainer,
+      child: InkWell(
+        onTap: () async {
+          final changed = await Navigator.of(context).push<bool>(
+              MaterialPageRoute(builder: (context) => const ImportView()));
+          if (!mounted) return;
+          setState(() => _updateReminderDismissed = true);
+          if (changed == true) {
+            ScopedModel.of<MainStateModel>(context).refresh();
+          }
+        },
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 10, 8, 10),
+          child: Row(children: [
+            Icon(Icons.sync, size: 18, color: scheme.onPrimaryContainer),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                '$_lastCheckedDescription，点此检查课表更新',
+                style: TextStyle(
+                    fontSize: 13, color: scheme.onPrimaryContainer),
+              ),
+            ),
+            IconButton(
+              icon: const Icon(Icons.close, size: 18),
+              color: scheme.onPrimaryContainer,
+              tooltip: '本次不再提示',
+              onPressed: () =>
+                  setState(() => _updateReminderDismissed = true),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  /// 判断这张课表是不是该提醒检查更新了。只做判断，不去登录抓取——
+  /// 到点了在课表顶部出现一条提示，点了才走完整流程。
+  ///
+  /// 之所以是"提醒"而不是"静默自动执行"：抓取必须先登录，而登录会话保不住
+  /// （早期的"快捷导入"就是栽在这上面才删掉的），每次打开 App 都自动跑一遍
+  /// 完整登录既慢又可能弹验证码，代价比收益大。等后台方案的会话策略定下来
+  /// 之后再考虑自动执行。
+  Future<void> _refreshUpdateReminder(BuildContext context) async {
+    try {
+      final provider = CourseTableProvider();
+      final pinyin = await provider.getSourceSchoolPinyin(_tableIndex);
+      final lastCheckedAt = await provider.getLastCheckedAt(_tableIndex);
+      final interval = await ScopedModel.of<MainStateModel>(context)
+          .getUpdateCheckInterval();
+
+      _updateReminderDue = shouldRemindUpdateCheck(
+        isAutoImported: pinyin != null && pinyin.isNotEmpty,
+        lastCheckedAt: lastCheckedAt,
+        interval: interval,
+        now: DateTime.now(),
+      );
+      _lastCheckedDescription =
+          describeLastChecked(lastCheckedAt, DateTime.now());
+    } catch (e) {
+      // 提醒是锦上添花，读失败就当不用提醒，绝不能因此把课表页整个卡住。
+      _updateReminderDue = false;
+    }
   }
 
   Future<List<Widget>> _buildClassesWidgetListByWeek(
@@ -354,6 +434,7 @@ class CourseTableViewState extends State<CourseTableView> {
                                 Column(
                                     mainAxisSize: MainAxisSize.max,
                                     children: <Widget>[
+                                      _buildUpdateReminder(context),
                                       WeekTitle(
                                           _maxShowDays,
                                           _weekTitleHeight,
