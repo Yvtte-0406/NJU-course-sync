@@ -9,9 +9,8 @@ import 'package:webview_flutter/webview_flutter.dart';
 import '../../Components/Toast.dart';
 import '../../Resources/NjuConfig.dart';
 import '../../Services/CourseSyncService.dart';
-import '../../Utils/NjuAutoLoginScript.dart';
+import '../../Services/NjuLoginService.dart';
 import '../../Utils/NjuCredentialStore.dart';
-import '../../Utils/NjuEhallJsonImporter.dart';
 import '../../Utils/States/MainState.dart';
 
 /// 南大专属导入/登录流程。
@@ -69,8 +68,10 @@ class _ImportViewState extends State<ImportView> {
 
   WebViewController? _webViewController;
   NjuEntryConfig? _activeConfig;
-  bool _autofillAttempted = false;
-  Timer? _loginTimeoutTimer;
+
+  /// 当前这次登录。手动兜底时用户接手的就是它建的那个 WebView，所以登录
+  /// 失败了也不能立刻扔——要等用户离开这一页或重试时才 [NjuLoginService.dispose]。
+  NjuLoginService? _loginService;
 
   // 本次登录成功后要做什么：新建一张表，还是更新当前显示的那张表。
   // 由入口页按钮点了哪个决定，登录本身没有任何区别。
@@ -158,7 +159,8 @@ class _ImportViewState extends State<ImportView> {
   void dispose() {
     _usernameController.dispose();
     _passwordController.dispose();
-    _loginTimeoutTimer?.cancel();
+    // 页面都关了，脚本还在那个 WebView 里跑就纯属浪费（还会继续点登录按钮）。
+    unawaited(_loginService?.dispose());
     super.dispose();
   }
 
@@ -174,108 +176,117 @@ class _ImportViewState extends State<ImportView> {
       _stage = _Stage.loggingIn;
       _statusText = '正在登录...';
     });
-    _beginLogin(NjuConfig.loginProbe);
+    unawaited(_runLogin(NjuConfig.loginProbe));
   }
 
-  /// 打开后台 WebView 加载登录页，等 [_onPageFinished] 接手注入自动登录
-  /// 脚本。自动更新和手输账密走的是同一个方法——两者的区别只在账号密码
-  /// 从哪来（存的 / 刚输的），登录本身没有任何差别。
-  void _beginLogin(NjuEntryConfig config, {int timeoutSeconds = 25}) {
+  /// 跑一次完整的自动登录，然后按 [_updatingCurrentTable] 分流去抓取。
+  ///
+  /// 登录本身全在 [NjuLoginService] 里（填表、过滑块、判结果），这里只负责
+  /// 三件界面的事：把 WebView 挂上去、把失败翻译成对应的页面、成功后接着抓。
+  /// 手输账密和用记住的账密走的是同一个方法——区别只在账号密码从哪来。
+  Future<void> _runLogin(NjuEntryConfig config) async {
     _activeConfig = config;
-    _autofillAttempted = false;
-    _loginTimeoutTimer?.cancel();
-    _loginTimeoutTimer = Timer(Duration(seconds: timeoutSeconds), () {
-      if (!mounted || _stage != _Stage.loggingIn) return;
-      // 走 _fallBackToManualLogin 而不是直接改 stage：超时的时候自动登录
-      // 脚本多半还在跑，必须先把它停掉再把表单交给用户。
-      _fallBackToManualLogin('自动登录超时，请在下方手动完成登录');
-    });
+    await _loginService?.dispose();
 
-    final url = Uri.parse(config.initialUrl);
-    if (_webViewController == null) {
-      _webViewController = WebViewController()
-        ..setJavaScriptMode(JavaScriptMode.unrestricted)
-        ..setBackgroundColor(const Color(0x00000000))
-        ..addJavaScriptChannel(
-          NjuAutoLoginScript.channelName,
-          onMessageReceived: _onAutoLoginMessage,
-        )
-        ..setNavigationDelegate(NavigationDelegate(
-          onPageFinished: _onPageFinished,
-          onWebResourceError: (error) {
-            if (!mounted) return;
-            _loginTimeoutTimer?.cancel();
-            setState(() {
-              _stage = _Stage.error;
-              _errorText = '网络错误，请检查网络连接（如需要请先连接南京大学 VPN）';
-            });
-          },
-        ))
-        ..loadRequest(url);
-    } else {
-      _webViewController!.loadRequest(url);
-    }
-  }
+    final service = NjuLoginService(
+      onLog: (message, level) => debugPrint('[NjuAutoLogin][$level] $message'),
+    );
+    _loginService = service;
 
-  Future<void> _onPageFinished(String url) async {
-    if (!mounted || _activeConfig == null) return;
-    final config = _activeConfig!;
+    // login() 在第一个 await 之前就把 controller 建好了，所以这里不等它
+    // 返回就能拿到——WebView 得先挂进界面，手动兜底时才能立刻显示出来。
+    final pending = service.login(
+      username: _usernameController.text.trim(),
+      password: _passwordController.text,
+      config: config,
+    );
+    if (mounted) setState(() => _webViewController = service.controller);
 
-    if (url.startsWith(config.targetUrl)) {
-      _loginTimeoutTimer?.cancel();
-      if (_stage == _Stage.fetching || _stage == _Stage.emptyResult) {
-        // 已经在抓取或结果展示阶段，避免重复触发。
+    var result = await pending;
+    if (!mounted) return;
+
+    if (!result.success) {
+      final handOver = await _handleLoginFailure(result);
+      if (!handOver) return;
+      // 页面已经交给用户了。等他自己登进去——成功之后走的是下面同一段
+      // 收尾逻辑（记住账号、按分流抓取），跟自动登录成功没有区别。
+      result = await service.awaitManualCompletion();
+      if (!mounted) return;
+      if (!result.success) {
+        setState(() {
+          _stage = _Stage.error;
+          _errorText = '${result.failure!.message}，请重试';
+        });
         return;
       }
-      unawaited(_markLoginSucceeded());
-      // 登录真的成功了，把这次用的账号密码记住：下次进来就能直接
-      // "自动更新"，不用再输一遍。自动更新路径下存的就是同一份，
-      // 重存一次没有副作用。
-      unawaited(NjuCredentialStore.save(
-        _usernameController.text.trim(),
-        _passwordController.text,
-      ));
-      if (_updatingCurrentTable) {
-        await _fetchAndUpdateCurrent(config);
-      } else {
-        await _fetchAndImport(config);
-      }
-      return;
     }
 
-    final isLoginPage = url.contains('authserver.nju.edu.cn/authserver/login');
-    if (!isLoginPage) return;
-    if (_stage != _Stage.loggingIn && _stage != _Stage.needManualLogin) return;
+    unawaited(_markLoginSucceeded());
+    // 登录真的成功了，把这次用的账号密码记住：下次进来就能直接用入口页的
+    // 两个按钮，不用再输一遍。用记住的账密登录时存的就是同一份，重存无害。
+    unawaited(NjuCredentialStore.save(
+      _usernameController.text.trim(),
+      _passwordController.text,
+    ));
 
-    // 还停在登录页：第一次注入自动登录脚本，之后如果又回到登录页，
-    // 说明提交失败（账号密码错误，或者过了验证码兜底页又失败一次）。
-    if (!_autofillAttempted) {
-      _autofillAttempted = true;
-      await _startAutoLoginScript();
-      // 脚本是异步跑的（填表、过滑块、提交都要时间），结果通过
-      // JavaScriptChannel 回到 [_onAutoLoginMessage]，成功则由下一次
-      // onPageFinished 命中 targetUrl 接手，这里不再等它的返回值。
-      return;
+    if (_updatingCurrentTable) {
+      await _fetchAndUpdateCurrent(config);
+    } else {
+      await _fetchAndImport(config);
     }
+  }
 
-    // 已经尝试过自动填表，又回到了登录页 -> 大概率是账号密码错误。
-    if (_stage == _Stage.loggingIn) {
-      _loginTimeoutTimer?.cancel();
-      final errorMessage = await _scrapeLoginError();
-      if (!mounted) return;
+  /// 登录失败的处置。返回 true 表示**页面已经交给用户手动完成**，调用方
+  /// 应该接着 await [NjuLoginService.awaitManualCompletion]；返回 false
+  /// 表示已经落到错误页，这一轮到此结束。
+  ///
+  /// 分界线是「人能不能解决」：账号密码错和网络错走错误页——用户得先去改
+  /// 密码或连上网，留在这一页手动登录也是白搭；其余一律把真实网页显示
+  /// 出来，这些都是「机器没过、人能过」的情况。
+  Future<bool> _handleLoginFailure(NjuLoginResult result) async {
+    final failure = result.failure!;
+
+    if (failure == NjuLoginFailure.invalidCredentials) {
+      // 页面上通常有一句更具体的提示（"用户名或密码错误"/"账号已锁定"…），
+      // 能抓到就用它，比笼统的"账号或密码错误"有用得多。
+      final scraped = await _scrapeLoginError();
+      if (!mounted) return false;
       setState(() {
         _stage = _Stage.error;
-        if (errorMessage.startsWith('[DEBUG_DUMP]')) {
+        if (scraped.startsWith('[DEBUG_DUMP]')) {
           _errorText = '没能识别到明确的错误提示。\n\n'
               '下面是登录表单的 HTML 结构（长按可复制发给开发者用来调整识别逻辑）：\n\n'
-              '${errorMessage.substring('[DEBUG_DUMP]'.length)}';
+              '${scraped.substring('[DEBUG_DUMP]'.length)}';
         } else {
-          _errorText = errorMessage.isNotEmpty
-              ? '登录失败：$errorMessage'
-              : '账号或密码错误，请检查后重试';
+          _errorText =
+              scraped.isNotEmpty ? '登录失败：$scraped' : '${failure.message}，请检查后重试';
         }
       });
+      return false;
     }
+
+    if (failure == NjuLoginFailure.network) {
+      setState(() {
+        _stage = _Stage.error;
+        _errorText = failure.message;
+      });
+      return false;
+    }
+
+    if (failure == NjuLoginFailure.sliderNoPointerSupport) {
+      // 滑块对合成的 touch 和 mouse 事件都没反应，多半是组件换了实现。
+      // 这是代码要跟着改的，不是用户能解决的，日志里留一句好定位。
+      debugPrint('[NjuAutoLogin] 滑块对合成的 touch/mouse 事件都无反应');
+    }
+
+    final detail = failure == NjuLoginFailure.unknown && result.detail.isNotEmpty
+        ? '${failure.message}：${result.detail}'
+        : failure.message;
+    setState(() {
+      _stage = _Stage.needManualLogin;
+      _statusText = '$detail，请在下方手动完成登录';
+    });
+    return true;
   }
 
   Future<String> _runJs(String js) async {
@@ -285,88 +296,6 @@ class _ImportViewState extends State<ImportView> {
       status = status.substring(1, status.length - 1);
     }
     return status;
-  }
-
-  /// 把 `assets/scripts/auto_auth_login.js` 注入登录页跑起来。填表、按需
-  /// 刷新验证码、过滑块、提交、判断结果全在那个脚本里，这边只负责启动它
-  /// 和接收它回传的消息（[_onAutoLoginMessage]）。
-  Future<void> _startAutoLoginScript() async {
-    try {
-      await NjuAutoLoginScript.inject(
-        _webViewController!,
-        username: _usernameController.text.trim(),
-        password: _passwordController.text,
-      );
-    } catch (e) {
-      _fallBackToManualLogin('自动登录脚本启动失败（$e），请在下方手动完成登录');
-    }
-  }
-
-  /// 自动登录脚本通过 JavaScriptChannel 回传的消息。
-  void _onAutoLoginMessage(JavaScriptMessage message) {
-    if (!mounted) return;
-    final event = NjuAutoLoginScript.decode(message.message);
-    switch (event.type) {
-      case 'log':
-        debugPrint('[NjuAutoLogin][${event.level}] ${event.message}');
-        return;
-      case 'solveCaptcha':
-        // 图形验证码识别在扩展里是丢给 background 跑 ONNX 模型的，App 里
-        // 没有推理运行时，识别不了。halt 掉脚本（不然它会一直刷验证码跟
-        // 用户抢输入框），把真实页面交还给用户手动填。
-        _fallBackToManualLogin('出现了图形验证码，请在下方手动完成登录');
-        return;
-      case 'loginComplete':
-        if (event.success) {
-          // 成功不在这里收口：还要等 WebView 真的跳到目标页，
-          // 由 [_onPageFinished] 命中 targetUrl 之后接手抓取。
-          return;
-        }
-        _handleAutoLoginFailure(event.message);
-        return;
-    }
-  }
-
-  /// 脚本抛上来的失败原因分两类：账号密码错这种再试也没用，直接报错；
-  /// 滑块/表单没搞定这种是「机器没过、人能过」，退回手动登录。
-  void _handleAutoLoginFailure(String reason) {
-    if (_stage != _Stage.loggingIn) return;
-    if (reason.contains('NJU_INVALID_CREDENTIALS')) {
-      _loginTimeoutTimer?.cancel();
-      unawaited(NjuAutoLoginScript.halt(_webViewController!));
-      setState(() {
-        _stage = _Stage.error;
-        _errorText = '账号或密码错误，请检查后重试';
-      });
-      return;
-    }
-    if (reason.contains('NJU_SLIDER_FAILED_TWICE')) {
-      _fallBackToManualLogin('滑块验证连续失败，请在下方手动完成登录');
-      return;
-    }
-    if (reason.contains('NJU_SLIDER_NO_POINTER_SUPPORT')) {
-      // 触摸和鼠标两种合成事件页面都没接住——多半是滑块组件换了实现
-      // （比如改用 Pointer Events）。这种是代码要跟着改的，不是用户能
-      // 解决的，日志里留一句好定位。
-      debugPrint('[NjuAutoLogin] 滑块对合成的 touch/mouse 事件都无反应');
-      _fallBackToManualLogin('无法自动完成滑块验证，请在下方手动滑动');
-      return;
-    }
-    _fallBackToManualLogin(
-        reason.isEmpty ? '自动登录失败，请在下方手动完成登录' : '自动登录失败：$reason\n请在下方手动完成登录');
-  }
-
-  /// 把页面交还给用户手动登录。必须先 halt 脚本：它还在跑的话会继续改
-  /// 输入框、刷验证码、点登录按钮，跟用户抢同一个表单。
-  void _fallBackToManualLogin(String statusText) {
-    if (_stage != _Stage.loggingIn) return;
-    _loginTimeoutTimer?.cancel();
-    final controller = _webViewController;
-    if (controller != null) unawaited(NjuAutoLoginScript.halt(controller));
-    setState(() {
-      _stage = _Stage.needManualLogin;
-      _statusText = statusText;
-    });
   }
 
   /// 调试用：把当前页面上"看起来像验证码/滑块组件"的那块 HTML 导出，
@@ -566,13 +495,16 @@ class _ImportViewState extends State<ImportView> {
   /// 入口页或登录表单），也可以指定具体页面（比如"新账号登录"按钮要强制
   /// 回登录表单，不是回入口页）。
   void _retry({_Stage? stage}) {
+    // 上一轮的 WebView 连同里面还在跑的脚本一起丢掉，下一轮 [_runLogin]
+    // 会新建一个。不停的话它会继续在后台点登录按钮。
+    unawaited(_loginService?.dispose());
+    _loginService = null;
     setState(() {
       _stage = stage ?? _initialStage;
       _statusText = '';
       _errorText = '';
       _webViewController = null;
       _activeConfig = null;
-      _autofillAttempted = false;
       _updatingCurrentTable = false;
       _updateReport = null;
       _emptyResult = null;
@@ -737,10 +669,13 @@ class _ImportViewState extends State<ImportView> {
 
   /// 登录/抓取过程中的转圈界面。
   ///
-  /// WebView 是铺在底下、被不透明遮罩盖住的，不是多余的：自动登录脚本回放
-  /// 滑块轨迹用的是 `requestAnimationFrame`，而 rAF 只有在 WebView 真的挂进
-  /// 视图树、参与合成的时候才会触发。要是这里只挂一个转圈指示器、把 WebView
-  /// 留在树外，轨迹回放会一直卡住，直到 [_beginLogin] 的超时把流程推走。
+  /// WebView 铺在底下、被不透明遮罩盖住，是为了**手动兜底能立刻接上**：滑块
+  /// 没过时要把同一个页面交给用户，页面已经在树上就只是掀掉遮罩，不用重新
+  /// 加载一遍登录页。
+  ///
+  /// 注意这里**不是**为了让 `requestAnimationFrame` 跑起来。曾经以为轨迹回放
+  /// 依赖 WebView 参与合成，实验证明相反：不挂进视图树的 WebView 反而跑满
+  /// 60fps，挂上去的因为要参与合成只有 8fps。后台任务能成立就是靠这个结论。
   Widget _buildProgressOverWebView(BuildContext context) {
     final progress = Center(
       child: Column(
@@ -827,9 +762,9 @@ class _ImportViewState extends State<ImportView> {
   }
 
   /// 拿存下来的账号密码重跑一遍完整登录，跟手输账密走的是同一条链路
-  /// （[_beginLogin] -> 注入脚本填表过滑块 -> 命中目标页抓取），区别
-  /// 只是用户不用再输一遍。[updateCurrent] 决定登录成功后是新建一张表
-  /// 还是更新当前显示的那张（[_onPageFinished] 里据此分流）。
+  /// （[_runLogin] -> [NjuLoginService] 填表过滑块 -> 命中目标页抓取），
+  /// 区别只是用户不用再输一遍。[updateCurrent] 决定登录成功后是新建一张表
+  /// 还是更新当前显示的那张。
   void _startWithSavedCredentials({required bool updateCurrent}) {
     if (_usernameController.text.trim().isEmpty ||
         _passwordController.text.isEmpty) {
@@ -842,7 +777,7 @@ class _ImportViewState extends State<ImportView> {
       _stage = _Stage.loggingIn;
       _statusText = '正在用记住的账号自动登录...';
     });
-    _beginLogin(NjuConfig.loginProbe);
+    unawaited(_runLogin(NjuConfig.loginProbe));
   }
 
   void _startNewImport() =>
