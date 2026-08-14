@@ -8,7 +8,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import '../../Components/Toast.dart';
 import '../../Resources/NjuConfig.dart';
+import '../../Services/BackgroundSyncGuard.dart';
 import '../../Services/CourseSyncService.dart';
+import '../../Services/ForegroundSyncLock.dart';
 import '../../Services/NjuLoginService.dart';
 import '../../Utils/NjuCredentialStore.dart';
 import '../../Utils/States/MainState.dart';
@@ -58,6 +60,8 @@ class _ImportViewState extends State<ImportView> {
   final _usernameController = TextEditingController();
   final _passwordController = TextEditingController();
   final _syncService = CourseSyncService();
+  // 写库期间挡住后台任务，避免两个 isolate 同时开 sqflite。
+  final _lock = const ForegroundSyncLock();
 
   _Stage _stage = _Stage.checkingPriorLogin;
   // 重试时要回到的"起始页"：之前登录过、账号密码也还在，就是三选一的
@@ -228,6 +232,10 @@ class _ImportViewState extends State<ImportView> {
       _usernameController.text.trim(),
       _passwordController.text,
     ));
+    // 后台检查要是因为凭据连续失败被停用过，这次成功就是解除条件——用户
+    // 改完密码回来登了一次，正是"凭据已经修好了"的证明。不在这里恢复的话
+    // 后台会一直沉默，而用户根本不知道还有个开关等着他打开。
+    unawaited(BackgroundSyncGuard().reenable());
 
     if (_updatingCurrentTable) {
       await _fetchAndUpdateCurrent(config);
@@ -409,7 +417,10 @@ class _ImportViewState extends State<ImportView> {
   /// BuildContext 的那几件事：切换当前课表、申请电池优化白名单、提示、返回。
   Future<void> _importAsNewTable(
       NjuEntryConfig config, FetchResult fetch) async {
-    final tableId = await _syncService.importAsNewTable(config, fetch);
+    // 建表期间后台任务要是醒过来，两个 isolate 会同时写同一个 sqflite 文件。
+    // 持锁让后台跳过本轮，代价只是晚几小时更新。
+    final tableId = await _lock
+        .protect(() => _syncService.importAsNewTable(config, fetch));
 
     if (mounted) {
       await ScopedModel.of<MainStateModel>(context).changeclassTable(tableId);
@@ -485,7 +496,7 @@ class _ImportViewState extends State<ImportView> {
   }
 
   Future<void> _applyUpdateChanges() async {
-    await _syncService.applyChanges(_updateReport!);
+    await _lock.protect(() => _syncService.applyChanges(_updateReport!));
     if (!mounted) return;
     Toast.showToast('已更新当前课程表', context);
     Navigator.of(context).pop(true);

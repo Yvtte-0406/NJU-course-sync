@@ -5,6 +5,7 @@ import '../../Components/Toast.dart';
 import '../../Models/CourseTableModel.dart';
 import '../../Resources/NjuConfig.dart';
 import '../../Services/CourseSyncService.dart';
+import '../../Services/ForegroundSyncLock.dart';
 
 /// "检查更新"页面：复用已登录 WebView 抓取最新课表，跟当前数据库里的课程
 /// 做比对，展示变更预览由用户确认后再落库。
@@ -26,6 +27,8 @@ enum _Stage { loadingConfig, unsupported, webview, reviewing, applied }
 class _CheckUpdateViewState extends State<CheckUpdateView> {
   final CourseTableProvider _courseTableProvider = CourseTableProvider();
   final CourseSyncService _syncService = CourseSyncService();
+  // 写库期间挡住后台任务，避免两个 isolate 同时开 sqflite。
+  final ForegroundSyncLock _lock = const ForegroundSyncLock();
 
   _Stage _stage = _Stage.loadingConfig;
   String _message = '正在准备检查…';
@@ -127,11 +130,13 @@ class _CheckUpdateViewState extends State<CheckUpdateView> {
     try {
       Toast.showToast('正在抓取最新课表…', context);
       final fetch = await _syncService.fetch(_webViewController!, _entry!);
-      final report = await _syncService.compareWithTable(
-        config: _entry!,
-        fetch: fetch,
-        tableId: widget.tableId,
-      );
+      // compareWithTable 内部会写库（消失课程的宽限期计数、本轮检查时间），
+      // 所以这一段也要持锁，挡住可能同时醒来的后台任务。
+      final report = await _lock.protect(() => _syncService.compareWithTable(
+            config: _entry!,
+            fetch: fetch,
+            tableId: widget.tableId,
+          ));
 
       if (!mounted) return;
       switch (report.outcome) {
@@ -173,7 +178,7 @@ class _CheckUpdateViewState extends State<CheckUpdateView> {
   }
 
   Future<void> _applyChanges() async {
-    await _syncService.applyChanges(_report!);
+    await _lock.protect(() => _syncService.applyChanges(_report!));
     if (mounted) {
       Toast.showToast('已应用课表变更', context);
       setState(() => _stage = _Stage.applied);
