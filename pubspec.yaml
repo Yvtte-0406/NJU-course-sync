@@ -50,6 +50,12 @@ dependencies:
   # 任何平台原生代码/platform channel，鸿蒙 OHOS 构建不需要额外适配。
   flutter_colorpicker: ^1.1.0
 
+  # 后台定时同步课表的调度器。插件只声明了 android / ios 两个平台实现，
+  # 鸿蒙上不会被注册——所以那边**能编译，但一调用就是 MissingPluginException**。
+  # 全部调用都收口在 BackgroundSyncScheduler 里，由它按平台拦掉，鸿蒙降级为
+  # 用户手动点「更新当前课程表」。将来鸿蒙要自动更新得自写原生调度。
+  workmanager: ^0.5.2
+
   # https://gitcode.com/openharmony-sig/flutter_plus_plugins/pull/52
   package_info_plus:
     path: ./external/flutter_plus_plugins_package_info_plus/packages/package_info_plus/package_info_plus
