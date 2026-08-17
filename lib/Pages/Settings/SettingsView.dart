@@ -15,6 +15,7 @@ import '../Lecture/LecturesView.dart';
 import '../About/AboutView.dart';
 import '../AddCourse/AddCourseView.dart';
 import 'AppearanceSettingsView.dart';
+import 'BackgroundSyncSettingsView.dart';
 import 'ScheduleDisplaySettingsView.dart';
 import 'WidgetSettingsView.dart';
 import '../Share/ShareView.dart';
@@ -60,6 +61,15 @@ class _SettingsViewState extends State<SettingsView> {
           title: const Text('添加课程'),
           subtitle: const Text('手动填写课程信息，或从讲座列表快捷添加'),
           onTap: () => _showAddCourseChoices(context),
+        ),
+        ListTile(
+          title: const Text('后台自动更新'),
+          subtitle: const Text('每天自动登录检查课表变化，无需手动操作'),
+          onTap: () {
+            Navigator.of(context).push(MaterialPageRoute(
+                builder: (BuildContext context) =>
+                    const BackgroundSyncSettingsView()));
+          },
         ),
         //TODO: 全校课程
         // ListTile(

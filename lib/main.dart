@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
@@ -15,6 +16,7 @@ import 'Resources/Themes.dart';
 import 'Resources/Constant.dart';
 import 'Utils/States/MainState.dart';
 import 'Utils/InitUtil.dart';
+import 'Services/BackgroundSyncScheduler.dart';
 
 void main() async {
   WidgetsBinding widgetsBinding = WidgetsFlutterBinding.ensureInitialized();
@@ -34,6 +36,13 @@ void main() async {
   if (Platform.isAndroid) {
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
   }
+
+  // 把用户之前打开的后台自动更新重新排进系统调度。不能只靠开关那个标记：
+  // WorkManager 里排好的任务在应用重装、或者某些厂商 ROM 清数据之后会消失，
+  // 而标记还留着——那样用户看到开关是开的，实际上永远不会执行。
+  // 用户没开、或者平台不支持（鸿蒙）时这里直接返回，不会碰插件。
+  // 不 await：它只是排个任务，没必要让启动画面为它多等一会儿。
+  unawaited(const BackgroundSyncScheduler().restoreOnLaunch());
 
   runApp(
       MyApp(themeConf[0], Constant.themeModeList[themeConf[1]], themeConf[2]));
