@@ -61,7 +61,7 @@ void main() {
     expect(find.textContaining('2 小时前'), findsOneWidget);
   });
 
-  testWidgets('条目不超过一页时不翻页，只有一个「知道了」', (tester) async {
+  testWidgets('只有一个「知道了」', (tester) async {
     await _open(tester, _summary(4));
 
     expect(find.text('知道了'), findsOneWidget);
@@ -69,19 +69,18 @@ void main() {
     expect(find.text('取消'), findsNothing);
   });
 
-  testWidgets('条目超过一页时分页，第二页显示后面的条目', (tester) async {
-    await _open(tester, _summary(6));
+  testWidgets('条目多的时候在同一个窗口里滚动，不分页', (tester) async {
+    await _open(tester, _summary(12));
 
-    // 第 1 页：课程0..3；第 2 页：课程4、课程5
+    // 全部条目都在这一个弹窗里——第一条可见，最后一条滚动之后也能看到。
     expect(find.text('课程0'), findsOneWidget);
-    expect(find.text('课程5'), findsNothing);
-    expect(find.textContaining('1 / 2'), findsOneWidget);
-
-    await tester.drag(find.text('课程0'), const Offset(-500, 0));
+    await tester.dragUntilVisible(
+      find.text('课程11'),
+      find.byType(SingleChildScrollView),
+      const Offset(0, -60),
+    );
     await tester.pumpAndSettle();
-
-    expect(find.text('课程5'), findsOneWidget);
-    expect(find.textContaining('2 / 2'), findsOneWidget);
+    expect(find.text('课程11'), findsOneWidget);
   });
 
   testWidgets('点「知道了」关闭弹窗', (tester) async {

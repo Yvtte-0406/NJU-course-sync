@@ -1,71 +1,29 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_swiper_null_safety_flutter3/flutter_swiper_null_safety_flutter3.dart';
 
 import '../../../Components/Dialog.dart';
 import '../../../Services/SyncChangeSummary.dart';
-
-/// 每页放几条。多了单页要滚动，弹窗本身也会顶到屏幕边；四条在小屏上刚好
-/// 不用滚。
-const int _kEntriesPerPage = 4;
 
 /// 后台自动更新完之后，告诉用户这一轮改了什么。
 ///
 /// 课表已经是更新好的状态了，这个弹窗只是"说明发生过什么"，没有需要用户
 /// 确认的动作——所以只有一个「知道了」。
 ///
-/// 变化多的时候分页左右翻，跟一个格子里挤了多门课时那个弹窗是同一套交互
-/// （[Swiper] + 圆点），用户见过。
+/// 条目多的时候在窗内滚动，不分页：分页要用户左右翻才能看全，而这里只是
+/// 一条通知性质的说明，滚动一下比翻页更省事。
 Future<void> showSyncChangeDialog(
   BuildContext context,
   SyncChangeSummary summary,
 ) {
-  final pages = <List<SyncChangeEntry>>[];
-  for (var i = 0; i < summary.entries.length; i += _kEntriesPerPage) {
-    pages.add(summary.entries.sublist(
-      i,
-      (i + _kEntriesPerPage).clamp(0, summary.entries.length),
-    ));
-  }
-
   return showDialog<void>(
     context: context,
-    builder: (context) {
-      if (pages.length == 1) {
-        return _SyncChangePage(summary: summary, entries: pages.first);
-      }
-      return Swiper(
-        itemBuilder: (context, index) => _SyncChangePage(
-          summary: summary,
-          entries: pages[index],
-          pageLabel: '${index + 1} / ${pages.length}',
-        ),
-        itemCount: pages.length,
-        pagination: SwiperPagination(
-          margin: const EdgeInsets.only(bottom: 100),
-          builder: DotSwiperPaginationBuilder(
-            color: Colors.grey,
-            activeColor: Theme.of(context).primaryColor,
-          ),
-        ),
-        // 变更条目是有顺序的，循环翻页会让人分不清看没看完。
-        loop: false,
-        viewportFraction: 1,
-        scale: 1,
-      );
-    },
+    builder: (context) => _SyncChangeDialog(summary: summary),
   );
 }
 
-class _SyncChangePage extends StatelessWidget {
-  const _SyncChangePage({
-    required this.summary,
-    required this.entries,
-    this.pageLabel,
-  });
+class _SyncChangeDialog extends StatelessWidget {
+  const _SyncChangeDialog({required this.summary});
 
   final SyncChangeSummary summary;
-  final List<SyncChangeEntry> entries;
-  final String? pageLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -84,7 +42,7 @@ class _SyncChangePage extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 12),
-            for (final entry in entries) _EntryRow(entry: entry),
+            for (final entry in summary.entries) _EntryRow(entry: entry),
           ],
         ),
       ),
@@ -99,9 +57,7 @@ class _SyncChangePage extends StatelessWidget {
 
   String _headline() {
     final where = summary.tableName.isEmpty ? '课表' : summary.tableName;
-    final when = _describeWhen(summary.at, DateTime.now());
-    final page = pageLabel == null ? '' : '　$pageLabel';
-    return '$where · $when$page';
+    return '$where · ${_describeWhen(summary.at, DateTime.now())}';
   }
 
   /// 用户可能隔了几天才打开 App，得说清楚这是什么时候的事。
