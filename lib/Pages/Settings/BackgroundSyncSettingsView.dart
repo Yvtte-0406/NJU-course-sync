@@ -24,7 +24,7 @@ class _BackgroundSyncSettingsViewState
   bool _enabled = false;
   bool _loading = true;
   GuardState? _guard;
-  String? _lastRun;
+  BackgroundSyncRecord? _lastRun;
 
   @override
   void initState() {
@@ -35,7 +35,7 @@ class _BackgroundSyncSettingsViewState
   Future<void> _load() async {
     final enabled = await _scheduler.isEnabled();
     final guard = await BackgroundSyncGuard().read();
-    final lastRun = await _scheduler.lastRunSummary();
+    final lastRun = await _scheduler.lastRun();
     if (!mounted) return;
     setState(() {
       _enabled = enabled;
@@ -95,6 +95,7 @@ class _BackgroundSyncSettingsViewState
           leading: const Icon(Icons.schedule),
           title: const Text('上次后台同步'),
           subtitle: Text(_describeLastRun()),
+          isThreeLine: _lastRun?.outcome == 'emptyFetch',
         ),
         ListTile(
           leading: const Icon(Icons.play_circle_outline),
@@ -163,26 +164,30 @@ class _BackgroundSyncSettingsViewState
   }
 
   String _describeLastRun() {
-    final raw = _lastRun;
-    if (raw == null || raw.isEmpty) return '还没有跑过';
-    final parts = raw.split('|');
-    final at = DateTime.tryParse(parts.first);
-    final outcome = parts.length > 1 ? parts[1] : '';
+    final record = _lastRun;
+    if (record == null) return '还没有跑过';
+    final at = record.at;
     final when = at == null
-        ? parts.first
+        ? ''
         : '${at.month}-${at.day} ${at.hour.toString().padLeft(2, '0')}:'
-            '${at.minute.toString().padLeft(2, '0')}';
-    return '$when · ${_outcomeLabel(outcome)}';
+            '${at.minute.toString().padLeft(2, '0')} · ';
+    return '$when${_outcomeLabel(record.outcome, record.semesterName)}';
   }
 
-  String _outcomeLabel(String outcome) {
+  String _outcomeLabel(String outcome, String semester) {
+    final inSemester = semester.isEmpty ? '' : '（$semester）';
     switch (outcome) {
       case 'ok':
-        return '已检查，课表是最新的';
+        return '已检查，课表是最新的$inSemester';
       case 'semesterChanged':
-        return '学期变了，需要新建课表';
+        return '教务系统已经是$semester了，需要新建课表';
       case 'emptyFetch':
-        return '没抓到课程，已跳过';
+        // 这句是这次改动的重点。空档期里教务系统停在上一个学期是很常见的，
+        // 而那时候 0 门课完全正常——光说"没抓到课程"会让人以为功能坏了，
+        // 把学期名摆出来就一眼看懂。
+        return semester.isEmpty
+            ? '没抓到课程，已跳过（未改动课表）'
+            : '教务系统当前显示的是$semester，\n你在这个学期没有课程，已跳过（未改动课表）';
       case 'loginFailed':
         return '登录失败';
       case 'disabledByGuard':
