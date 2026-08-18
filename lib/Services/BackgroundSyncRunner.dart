@@ -119,8 +119,16 @@ class BackgroundSyncRunner {
         case SyncOutcome.emptyFetch:
           // 一门课都没抓到判为抓取失败，不是"全学期停课了"。这一步
           // CourseSyncService 里已经拦住了，不会动数据。
+          //
+          // 学期名一定要带出去。学期之间的空档期里，教务系统当前显示的
+          // 学期可能根本不是用户那张表的学期（比如八月停在暑期学期，而
+          // 用户的表是秋季学期），这时候 0 门课完全正常。光说"没抓到课程"
+          // 会让人以为坏了，说清楚是哪个学期就一目了然。
           say('抓到 0 门课，判为抓取失败，未改动数据');
-          return const BackgroundSyncResult._(BackgroundSyncOutcome.emptyFetch);
+          return BackgroundSyncResult._(
+            BackgroundSyncOutcome.emptyFetch,
+            semesterName: fetch.semesterName,
+          );
         case SyncOutcome.noSuchTable:
           say('课表 $tableId 不存在');
           return const BackgroundSyncResult._(BackgroundSyncOutcome.notImportedTable);
@@ -131,6 +139,7 @@ class BackgroundSyncRunner {
           return BackgroundSyncResult._(
             BackgroundSyncOutcome.semesterChanged,
             report: report,
+            semesterName: fetch.semesterName,
           );
         case SyncOutcome.ok:
           // 新增和字段变更直接落库——项目目标就是"用户直接看到已经更新好
@@ -141,6 +150,7 @@ class BackgroundSyncRunner {
           return BackgroundSyncResult._(
             BackgroundSyncOutcome.ok,
             report: report,
+            semesterName: fetch.semesterName,
           );
       }
     } catch (e) {
@@ -192,6 +202,7 @@ class BackgroundSyncResult {
     this.loginFailure,
     this.verdict,
     this.errorMessage = '',
+    this.semesterName = '',
   });
 
   /// 只给测试用：真实的结果只能由 [BackgroundSyncRunner.run] 产出，但
@@ -204,6 +215,7 @@ class BackgroundSyncResult {
     this.loginFailure,
     this.verdict,
     this.errorMessage = '',
+    this.semesterName = '',
   });
 
   final BackgroundSyncOutcome outcome;
@@ -214,6 +226,13 @@ class BackgroundSyncResult {
   /// 时有值。
   final GuardVerdict? verdict;
   final String errorMessage;
+
+  /// 教务系统这次返回的是哪个学期。抓取真的走通了才有值。
+  ///
+  /// 存在的意义是把"抓到 0 门课"讲清楚：学期之间的空档期里，教务系统当前
+  /// 显示的学期可能根本不是用户那张表的学期，这时候 0 门课完全正常。没有
+  /// 这个字段的话，用户只会看到一句"没抓到课程"，无从判断是坏了还是正常。
+  final String semesterName;
 
   /// 这一轮有没有产生用户该知道的课表变化。
   ///

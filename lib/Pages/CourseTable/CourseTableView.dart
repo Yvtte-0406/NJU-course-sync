@@ -14,6 +14,8 @@ import '../AddCourse/AddCourseView.dart';
 import '../Settings/SettingsView.dart';
 import '../Import/ImportView.dart';
 import '../../Utils/UpdateCheckPolicy.dart';
+import '../../Services/SyncChangeSummary.dart';
+import 'Widgets/SyncChangeDialog.dart';
 import '../../Components/Separator.dart';
 import '../../Resources/Config.dart';
 import '../../Utils/States/MainState.dart';
@@ -69,6 +71,9 @@ class CourseTableViewState extends State<CourseTableView> {
   String _lastCheckedDescription = '';
   bool _updateReminderDismissed = false;
 
+  /// 后台自动更新留下的、还没给用户看过的变更摘要。
+  SyncChangeSummary? _pendingSyncSummary;
+
   List<Course> multiClassesDialog = [];
 
   Future<bool>? _getData(BuildContext context) async {
@@ -122,6 +127,7 @@ class CourseTableViewState extends State<CourseTableView> {
     }
 
     await _refreshUpdateReminder(context);
+    _pendingSyncSummary = await SyncChangeSummaryStore.read();
 
     _screenWidth = MediaQuery.of(context).size.width;
     _screenHeight = MediaQuery.of(context).size.height;
@@ -145,6 +151,21 @@ class CourseTableViewState extends State<CourseTableView> {
     }
 
     return true;
+  }
+
+  /// 后台自动更新完之后留下的变更摘要，等课表画出来再弹窗告诉用户。
+  ///
+  /// 不在 [_getData] 里直接弹：那时候课表还没画出来，弹窗会盖在空白页面上，
+  /// 用户关掉之后才看到课表，对不上号。等这一帧渲染完再弹，用户关掉弹窗
+  /// 就能立刻看到已经更新好的课表。
+  Future<void> _showPendingSyncSummary() async {
+    final summary = _pendingSyncSummary;
+    if (summary == null || !mounted) return;
+    // 先置空再弹，避免这一帧之后又被重建触发第二次。
+    _pendingSyncSummary = null;
+    await SyncChangeSummaryStore.clear();
+    if (!mounted) return;
+    await showSyncChangeDialog(context, summary);
   }
 
   /// 到期提示条。没到期、或者用户这次已经划掉了，就完全不占位置。
@@ -331,6 +352,10 @@ class CourseTableViewState extends State<CourseTableView> {
                   return Container(color: Colors.white);
                 } else {
                   _syncWeekPageController();
+                  // 课表这一帧画完之后再弹变更摘要，用户关掉弹窗就能直接
+                  // 看到更新后的课表。
+                  WidgetsBinding.instance.addPostFrameCallback(
+                      (_) => _showPendingSyncSummary());
 
                   String nowWeek =
                       S.of(context).week(_nowShowWeekNum.toString());
