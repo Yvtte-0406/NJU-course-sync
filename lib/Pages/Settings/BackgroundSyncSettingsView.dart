@@ -3,6 +3,9 @@ import 'package:flutter/material.dart';
 import '../../Components/Toast.dart';
 import '../../Services/BackgroundSyncGuard.dart';
 import '../../Services/BackgroundSyncScheduler.dart';
+// TODO(临时，跟「预览变更弹窗」一起删)
+import '../../Services/SyncChangeSummary.dart';
+import '../CourseTable/Widgets/SyncChangeDialog.dart';
 
 /// 后台自动更新的开关与状态。
 ///
@@ -109,6 +112,15 @@ class _BackgroundSyncSettingsViewState
             Toast.showToast('已排队，稍后回到这一页看结果', context);
           },
         ),
+        // TODO(临时，确认弹窗样式之后删掉这一条 ListTile 和 _previewSummary):
+        // 变更弹窗只有在学校真的调课之后才会出现，暑假或课表没变动时根本
+        // 触发不了，没法验证样式和翻页。这里塞一份假数据直接弹一次。
+        ListTile(
+          leading: const Icon(Icons.preview_outlined),
+          title: const Text('（临时）预览变更弹窗'),
+          subtitle: const Text('用假数据弹一次，确认样式和翻页，验完即删'),
+          onTap: () => showSyncChangeDialog(context, _previewSummary()),
+        ),
       ],
       const Divider(height: 1),
       if (_guard?.disabled ?? false) _buildDisabledWarning(context),
@@ -204,4 +216,44 @@ class _BackgroundSyncSettingsViewState
         return outcome;
     }
   }
+
+  /// TODO(临时，跟上面那条「预览变更弹窗」一起删): 造一份假摘要。
+  ///
+  /// 条目数刻意超过单页上限，好把翻页也一起验了。
+  SyncChangeSummary _previewSummary() => SyncChangeSummary(
+        at: DateTime.now().subtract(const Duration(hours: 3)),
+        tableName: '2025-2026学年第一学期',
+        entries: const [
+          SyncChangeEntry(
+            kind: SyncChangeKind.changed,
+            name: '高等数学',
+            detail: '教室：仙Ⅰ-101 → 仙Ⅰ-202',
+          ),
+          SyncChangeEntry(
+            kind: SyncChangeKind.changed,
+            name: '大学物理',
+            detail: '星期：3 → 4\n起始节次：5 → 7',
+          ),
+          SyncChangeEntry(
+            kind: SyncChangeKind.added,
+            name: '大学英语（口语）',
+            detail: '新增课程 · 星期3 第5 节 · 仙Ⅱ-305',
+          ),
+          SyncChangeEntry(
+            kind: SyncChangeKind.added,
+            name: '线性代数',
+            detail: '新增时间段 · 星期5 第1 节 · 仙Ⅰ-108',
+          ),
+          SyncChangeEntry(
+            kind: SyncChangeKind.hidden,
+            name: '2 门课已暂时隐藏',
+            detail: '学校数据里没找到。如果下次仍然找不到就会删除；期间重新出现会自动恢复。',
+          ),
+          SyncChangeEntry(
+            kind: SyncChangeKind.restored,
+            name: '1 门课已恢复显示',
+            detail: '之前没抓到，这次又出现了。',
+          ),
+        ],
+      );
 }
