@@ -107,7 +107,10 @@ class _BackgroundSyncSettingsViewState
           leading: const Icon(Icons.schedule),
           title: const Text('上次后台同步'),
           subtitle: Text(_describeLastRun()),
-          isThreeLine: _lastRun?.outcome == 'emptyFetch',
+          // 这两类的说明都不止一行：一句是"哪个学期没课"，一句是"失败了
+          // 该怎么办"，挤成一行会被截断，正好把最要紧的建议截没。
+          isThreeLine: _lastRun?.outcome == 'emptyFetch' ||
+              _lastRun?.outcome == 'loginFailed',
         ),
         ListTile(
           leading: const Icon(Icons.play_circle_outline),
@@ -184,7 +187,36 @@ class _BackgroundSyncSettingsViewState
         ? ''
         : '${at.month}-${at.day} ${at.hour.toString().padLeft(2, '0')}:'
             '${at.minute.toString().padLeft(2, '0')} · ';
+    if (record.outcome == 'loginFailed') {
+      return '$when${_loginFailureLabel(record.loginFailure)}';
+    }
     return '$when${_outcomeLabel(record.outcome, record.semesterName)}';
+  }
+
+  /// 「登录失败」四个字对用户没用——这几种失败要做的事完全不同，得直接
+  /// 说清楚下一步该干嘛。
+  String _loginFailureLabel(String failure) {
+    switch (failure) {
+      case 'invalidCredentials':
+        return '账号或密码不对。到「导入南大课表」用新密码登录一次即可恢复。';
+      case 'imageCaptcha':
+        return '出现了图形验证码，需要你手动登录一次。';
+      case 'network':
+        return '网络不通。校外访问教务系统需要先连上南京大学 VPN。';
+      case 'sliderFailed':
+        return '滑块验证没过。这种偶尔会发生，下一轮多半就好了，不用管。';
+      case 'sliderNoPointerSupport':
+        return '滑块验证方式变了，需要开发者适配。麻烦到反馈群里说一声。';
+      case 'scriptFailed':
+        return '登录脚本没能启动。重装一次 App 试试，还不行请反馈。';
+      case 'timeout':
+        return '登录超时。可能是网络慢或教务系统繁忙，下一轮会再试。';
+      case '':
+        // 旧版本存的记录没有这个字段，只能说到这一步。
+        return '登录失败';
+      default:
+        return '登录失败（$failure）';
+    }
   }
 
   String _outcomeLabel(String outcome, String semester) {
@@ -201,8 +233,8 @@ class _BackgroundSyncSettingsViewState
         return semester.isEmpty
             ? '没抓到课程，已跳过（未改动课表）'
             : '教务系统当前显示的是$semester，\n你在这个学期没有课程，已跳过（未改动课表）';
-      case 'loginFailed':
-        return '登录失败';
+      // loginFailed 不在这里处理——它要按具体失败原因给建议，_describeLastRun
+      // 会先拦下来交给 _loginFailureLabel。
       case 'disabledByGuard':
         return '已暂停，未执行';
       case 'foregroundBusy':

@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io' show Platform;
 import 'dart:ui';
 
@@ -132,6 +133,7 @@ class BackgroundSyncRecord {
     required this.at,
     required this.outcome,
     required this.semesterName,
+    this.loginFailure = '',
   });
 
   /// 什么时候跑的。时间戳坏掉时为 null。
@@ -143,17 +145,50 @@ class BackgroundSyncRecord {
   /// 教务系统当时返回的学期名，抓取没走到那一步就是空。
   final String semesterName;
 
-  /// 解析存下来的那行字符串。
+  /// [NjuLoginFailure] 的名字，只在 [outcome] 为 `loginFailed` 时有值。
   ///
-  /// 要兼容**两段式的旧记录**：学期名是后加的字段，已经装了这个 App 的
-  /// 用户本地存的还是 `时间|结果`，按三段切会直接崩或者拿到错的值。
+  /// 没有这个字段的话设置页只能显示干巴巴一句"登录失败"，而这几种失败
+  /// 用户要做的事完全不同：密码错了要去重新登录，没连 VPN 要连校园网，
+  /// 出验证码要手动登一次，滑块没过则等下一轮自己就好了。
+  final String loginFailure;
+
+  Map<String, dynamic> toJson() => {
+        'at': at?.toIso8601String() ?? '',
+        'outcome': outcome,
+        'semester': semesterName,
+        if (loginFailure.isNotEmpty) 'failure': loginFailure,
+      };
+
+  /// 解析存下来的记录。
+  ///
+  /// 现在写的是 JSON——之前是 `时间|结果|学期名` 的分隔串，但学期名是贪婪
+  /// 吃到结尾的（怕名字里带 `|`），再往后加字段就没位置了。换成 JSON 之后
+  /// 以后加字段不用再动这里。
+  ///
+  /// 仍然要认旧格式：已经装了这个 App 的用户本地存的还是分隔串，直接按
+  /// JSON 解会失败，那一行就白丢了。
   static BackgroundSyncRecord? parse(String? raw) {
     if (raw == null || raw.isEmpty) return null;
+    if (raw.startsWith('{')) {
+      try {
+        final map = json.decode(raw);
+        if (map is Map) {
+          return BackgroundSyncRecord(
+            at: DateTime.tryParse(map['at']?.toString() ?? ''),
+            outcome: map['outcome']?.toString() ?? '',
+            semesterName: map['semester']?.toString() ?? '',
+            loginFailure: map['failure']?.toString() ?? '',
+          );
+        }
+      } catch (_) {
+        // 落到下面按旧格式再试一次，实在不行也好过整条丢掉。
+      }
+    }
     final parts = raw.split('|');
     return BackgroundSyncRecord(
       at: DateTime.tryParse(parts.first),
       outcome: parts.length > 1 ? parts[1] : '',
-      // 学期名里万一带了 `|`，剩下的整段都算它的，不要只取第 3 段。
+      // 旧格式里学期名可能带 `|`，剩下的整段都算它的，不要只取第 3 段。
       semesterName: parts.length > 2 ? parts.sublist(2).join('|') : '',
     );
   }
@@ -174,8 +209,11 @@ void backgroundSyncDispatcher() {
     final log = <String>[];
     try {
       final result = await BackgroundSyncRunner().run(log: log);
-      await _recordLastRun(result.outcome.name,
-          semesterName: result.semesterName);
+      await _recordLastRun(
+        result.outcome.name,
+        semesterName: result.semesterName,
+        loginFailure: result.loginFailure?.name ?? '',
+      );
       await _savePendingSummary(result);
 
       // 通知发不出去不该影响这一轮同步的结论——课表数据这时候已经落库了。
@@ -217,17 +255,21 @@ Future<void> _savePendingSummary(BackgroundSyncResult result) async {
   await SyncChangeSummaryStore.save(summary);
 }
 
-/// 存成 `时间|结果|学期名` 三段。
-///
-/// 学期名里不会出现 `|`，所以用它分隔是安全的；真出现了也只影响这一行显示，
-/// [BackgroundSyncRecord.parse] 那边按最多 3 段切，多的会留在学期名里。
-Future<void> _recordLastRun(String outcome, {String semesterName = ''}) async {
+Future<void> _recordLastRun(
+  String outcome, {
+  String semesterName = '',
+  String loginFailure = '',
+}) async {
   try {
     final sp = await SharedPreferences.getInstance();
-    await sp.setString(
-      BackgroundSyncScheduler.prefsLastRunKey,
-      '${DateTime.now().toIso8601String()}|$outcome|$semesterName',
+    final record = BackgroundSyncRecord(
+      at: DateTime.now(),
+      outcome: outcome,
+      semesterName: semesterName,
+      loginFailure: loginFailure,
     );
+    await sp.setString(BackgroundSyncScheduler.prefsLastRunKey,
+        json.encode(record.toJson()));
   } catch (_) {
     // 记不上就算了，不值得为它把整轮判成失败。
   }
