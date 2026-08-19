@@ -15,6 +15,8 @@
     <uses-permission android:name="android.permission.WRITE_CALENDAR" />
     <!-- 请求忽略电池优化，降低厂商定制系统清后台导致登录会话丢失的概率 -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Android 13+ 发通知需要运行时授权，在用户打开「后台自动更新」开关时申请 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <queries>
         <!-- If your app opens https URLs -->
         <intent>

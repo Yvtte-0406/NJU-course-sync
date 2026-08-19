@@ -56,6 +56,11 @@ dependencies:
   # 用户手动点「更新当前课程表」。将来鸿蒙要自动更新得自写原生调度。
   workmanager: ^0.5.2
 
+  # 后台同步完成后的本地通知。跟 workmanager 一样只有 android / ios 实现，
+  # 鸿蒙上调用会抛 MissingPluginException——所有调用收口在 SyncNotifier 里
+  # 由它按平台拦掉。iOS 也暂时关着，理由与调度器一致（见 SyncNotifier）。
+  flutter_local_notifications: ^17.2.4
+
   # https://gitcode.com/openharmony-sig/flutter_plus_plugins/pull/52
   package_info_plus:
     path: ./external/flutter_plus_plugins_package_info_plus/packages/package_info_plus/package_info_plus

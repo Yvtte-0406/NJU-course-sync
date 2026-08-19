@@ -8,6 +8,7 @@ import 'package:workmanager/workmanager.dart';
 
 import 'BackgroundSyncRunner.dart';
 import 'SyncChangeSummary.dart';
+import 'SyncNotifier.dart';
 
 /// 后台定时同步的**调度器绑定层**：什么时候唤醒、怎么唤醒。
 ///
@@ -177,10 +178,9 @@ void backgroundSyncDispatcher() {
           semesterName: result.semesterName);
       await _savePendingSummary(result);
 
-      // TODO: 通知还没接。现在的行为是「静默更新好课表」——这本身符合项目
-      // 目标（用户直接看到已经更新好的课表），但 needsUserAttention 那条
-      // （凭据失效、后台已停用）必须能推送出去，否则用户永远不知道自动更新
-      // 停了。接通知是下一步。
+      // 通知发不出去不该影响这一轮同步的结论——课表数据这时候已经落库了。
+      // SyncNotifier 内部自己吞异常，这里不用再包一层。
+      await const SyncNotifier().notifyResult(result);
       debugPrint('[BgSync] ${result.outcome.name} '
           'changes=${result.hasChangesWorthNotifying} '
           'attention=${result.needsUserAttention}');

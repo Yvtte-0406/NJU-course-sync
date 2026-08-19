@@ -37,6 +37,15 @@ android {
         abortOnError false
     }
 
+    // flutter_local_notifications 用到了 java.time 那套 API，在低版本 Android
+    // 上要靠 desugaring 补齐，不开的话构建直接失败（checkDebugAarMetadata 会
+    // 报 "requires core library desugaring to be enabled"）。
+    compileOptions {
+        coreLibraryDesugaringEnabled true
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
     defaultConfig {
         applicationId "com.lilystudio.wheretosleepinnju"
         minSdkVersion flutter.minSdkVersion
@@ -75,6 +84,10 @@ flutter {
 }
 
 dependencies {
+    // 配合上面的 coreLibraryDesugaringEnabled，缺这一行会报
+    // "coreLibraryDesugaring configuration contains no dependencies"。
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.0.4'
+
     implementation  'com.umeng.umsdk:common:9.4.4'// 必选
     implementation  'com.umeng.umsdk:asms:1.4.1'// 必选
 //    implementation "com.umeng.umsdk:common:9.1.0"
