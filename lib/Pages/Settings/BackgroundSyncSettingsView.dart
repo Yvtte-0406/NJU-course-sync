@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../Components/Toast.dart';
 import '../../Services/BackgroundSyncGuard.dart';
 import '../../Services/BackgroundSyncScheduler.dart';
+import '../../Services/SyncNotifier.dart';
 
 /// 后台自动更新的开关与状态。
 ///
@@ -20,6 +21,7 @@ class BackgroundSyncSettingsView extends StatefulWidget {
 class _BackgroundSyncSettingsViewState
     extends State<BackgroundSyncSettingsView> {
   static const _scheduler = BackgroundSyncScheduler();
+  static const _notifier = SyncNotifier();
 
   bool _enabled = false;
   bool _loading = true;
@@ -48,7 +50,17 @@ class _BackgroundSyncSettingsViewState
   Future<void> _toggle(bool value) async {
     setState(() => _enabled = value);
     if (value) {
+      // 在这里申请通知权限，而不是 App 一启动就弹：打开这个开关本身就表示
+      // "我想收到课表更新"，此时弹权限框用户知道是为了什么；不用这个功能的
+      // 人则完全不会被打扰。
+      //
+      // 被拒绝也照常开启后台更新——课表还是会自动更新好，只是少了提醒。
+      // 唯一的代价是"自动更新被暂停"这类消息推不出去，所以下面会说明一句。
+      final granted = await _notifier.requestPermission();
       await _scheduler.enable();
+      if (mounted && !granted && _notifier.isSupported) {
+        Toast.showToast('没有通知权限，课表仍会自动更新，但更新和异常都不会提醒你', context);
+      }
     } else {
       await _scheduler.disable();
     }
@@ -123,6 +135,7 @@ class _BackgroundSyncSettingsViewState
         padding: EdgeInsets.fromLTRB(16, 0, 16, 24),
         child: Text(
           '· 后台更新需要用到你保存的账号密码，每次都会重新登录一次。\n'
+          '· 课表有变化时会发一条通知，没有变化就不打扰你。\n'
           '· 连续两次登录失败（密码错误）会自动停用，避免统一认证账号被锁定。'
           '重新登录成功后会自动恢复。\n'
           '· 厂商系统的省电策略可能推迟甚至阻止后台任务，这不是 App 能控制的。'
